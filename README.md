@@ -66,7 +66,19 @@ Current result: 22,711 functions lifted into 33 chunks (~2.9M lines), 501 jump t
 
 Build needs **clang-cl** (VS Installer → "C++ Clang tools for Windows") plus CMake and Ninja.
 
-## 4. Build and run
+## 4. Lift the game's PRX modules
+
+The game loads its characters, enemies and shots as 118 PRX modules at run time. Each one is relocated at its own fixed guest base (0x40000000-0x42990000) and lifted with its own symbol prefix:
+
+```powershell
+.venv\Scripts\python tools\build_prx.py --jobs 16   # -> game\prx\*.bin, recompiled_prx\*.cpp + prx_table.c
+```
+
+At run time [src/port_prx.c](src/port_prx.c) answers `sys_prx_load_module` by copying the module image to its base and registering its functions, calls `module_start` for `sys_prx_start_module`, and implements the 12 `sys_libc` functions the modules import.
+
+## 5. Build and run
+
+The first build takes about 45 minutes (the EBOOT plus 118 modules, ~850 MB of generated C++).
 
 ```powershell
 build.bat          # applies patches\ps3recomp\*.patch to the submodule, then CMake + Ninja with clang-cl
@@ -93,11 +105,11 @@ Keyboard: Enter = Start, arrows = D-pad, Z = Cross (confirm), X = Circle (back),
 ## Status
 
 - Boots, title screen renders correctly with text, no flicker, 60+ FPS, keyboard input works, save data loads.
-- Main menu renders fully (book pages, options, button hints); Local Play works.
-- After Local Play a popup opens with no message text: the game submits no glyph draws for it, and makes no system calls when it opens (under investigation).
+- Main menu, Local Play lobby and the PSN notice render fully.
+- **Chapter 1 loads and plays** with Soma: HUD, timer and enemies run, keyboard controls the character.
 - The license check (`sceNpDrmVerifyUpgradeLicense`) is faked as OK, so the game runs as the full version.
 - Audio: the ATRAC decoder needs the firmware's `flashATRAC.pic`; likely silent.
-- The 118 game PRX modules (characters, enemies) are not loaded yet.
+- ps3recomp's `lift_prx.py` gained the REL24/REL14/ADDR64/ADDR16_LO_DS relocations (and a corrected REL64) the game's modules use.
 
 ## Notes
 

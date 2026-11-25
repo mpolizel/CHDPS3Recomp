@@ -17,6 +17,7 @@ gamedata/
 # Generated
 out/
 recompiled/
+recompiled_prx/
 build/
 .venv/
 __pycache__/

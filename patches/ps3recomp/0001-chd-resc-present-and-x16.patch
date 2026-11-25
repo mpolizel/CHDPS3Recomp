@@ -460,3 +460,46 @@ index 5b177b83..05ae57a1 100644
  }
  
  /* The depth formats decode to one channel and present it on every source,
+diff --git a/runtime/ppu/ppu_loader.cpp b/runtime/ppu/ppu_loader.cpp
+index 341b7105..d66db8ea 100644
+--- a/runtime/ppu/ppu_loader.cpp
++++ b/runtime/ppu/ppu_loader.cpp
+@@ -2285,7 +2285,7 @@ typedef void (*ppu_fn)(ppu_context*);
+ /* 2^18 = 262144 slots. MUST exceed the lifted function count or the open-addressing
+  * insertion loop below spins forever (the re-lifted flОw has 104,415 functions; a
+  * 2^16=65536 table overflowed -> infinite loop -> early-boot hang). */
+-#define PPU_HASH_BITS 18
++#define PPU_HASH_BITS 19   /* EBOOT + a title's lifted game PRX modules (~200k entries) */
+ #define PPU_HASH_SIZE (1u << PPU_HASH_BITS)
+ #define PPU_HASH_MASK (PPU_HASH_SIZE - 1)
+ 
+diff --git a/tools/lift_prx.py b/tools/lift_prx.py
+index 9fca6d5c..f6c76603 100644
+--- a/tools/lift_prx.py
++++ b/tools/lift_prx.py
+@@ -106,7 +106,24 @@ class Prx:
+             elif rtype == 6:      # ADDR16_HA
+                 img[target:target + 2] = struct.pack(
+                     ">H", ((value + 0x8000) >> 16) & 0xFFFF)
+-            elif rtype == 44:     # REL64 (rare)
++            elif rtype in (10, 11, 44, 57):
++                # Semantics from RPCS3 PPUModule.cpp ppu_load_prx. raddr is
++                # the absolute address of the patched word.
++                raddr = base + target
++                if rtype == 10:   # REL24: branch target in bits 6-29
++                    w = be32(img, target)
++                    w = (w & 0xFC000003) | ((value - raddr) & 0x03FFFFFC)
++                    img[target:target + 4] = struct.pack(">I", w)
++                elif rtype == 11: # REL14: conditional branch target in bits 16-29
++                    w = be32(img, target)
++                    w = (w & 0xFFFF0003) | ((value - raddr) & 0x0000FFFC)
++                    img[target:target + 4] = struct.pack(">I", w)
++                elif rtype == 44: # REL64
++                    img[target:target + 8] = struct.pack(">Q", (value - raddr) & (2**64 - 1))
++                else:             # 57 ADDR16_LO_DS: keep the low 2 bits (DS form)
++                    h = struct.unpack(">H", img[target:target + 2])[0]
++                    img[target:target + 2] = struct.pack(">H", (h & 3) | (value & 0xFFFC))
++            elif rtype == 38:     # ADDR64
+                 img[target:target + 8] = struct.pack(">Q", value & (2**64 - 1))
+             else:
+                 raise SystemExit(f"unhandled relocation type {rtype} "

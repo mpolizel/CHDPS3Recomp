@@ -27,6 +27,7 @@
  * -----------------------------------------------------------------------*/
 
 extern "C" void port_resc_register(void);   /* src/port_resc.c */
+extern "C" void port_prx_register(void);    /* src/port_prx.c */
 extern "C" void rsx_d3d12_alias_texture_to_rt(uint32_t tex_off, uint32_t rt_off);
 
 extern "C" void ps3_load_prx_modules(void)
@@ -34,11 +35,15 @@ extern "C" void ps3_load_prx_modules(void)
     /* Runs after the HLE tables are registered and before the game starts,
      * so context handlers registered here take precedence. */
     port_resc_register();
+    port_prx_register();
 
     /* The menus render their UI layer into the RT at 0x02AF9800, then the
-     * CPU copies it to 0x0443C000 and the final pass samples that copy. The
-     * RT only exists on the host GPU, so the copy moved zeros: sample the RT. */
+     * game's own code copies it into one of two buffers and the final pass
+     * samples that copy. The RT only exists on the host GPU, so the copy moved
+     * zeros: sample the RT. 0x0443C000 is used on the title/main menu,
+     * 0x03C53000 from the Local Play lobby on. */
     rsx_d3d12_alias_texture_to_rt(0x0443C000u, 0x02AF9800u);
+    rsx_d3d12_alias_texture_to_rt(0x03C53000u, 0x02AF9800u);
 }
 
 /* ---------------------------------------------------------------------------

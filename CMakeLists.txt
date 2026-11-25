@@ -66,6 +66,17 @@ endif()
 list(LENGTH RECOMP_SOURCES RECOMP_SOURCE_COUNT)
 message(STATUS "Lifted sources:  ${RECOMP_SOURCE_COUNT} file(s)")
 
+# The game's own PRX modules, lifted by tools/build_prx.py (one .cpp each plus
+# prx_table.c). They take the same per-file options as the EBOOT's sources.
+set(PRX_DIR "${CMAKE_CURRENT_SOURCE_DIR}/recompiled_prx")
+if(NOT EXISTS "${PRX_DIR}/prx_table.c")
+    message(FATAL_ERROR "No ${PRX_DIR}/prx_table.c: run python tools/build_prx.py first.")
+endif()
+file(GLOB PRX_SOURCES CONFIGURE_DEPENDS "${PRX_DIR}/*.cpp")
+list(LENGTH PRX_SOURCES PRX_SOURCE_COUNT)
+message(STATUS "PRX modules:     ${PRX_SOURCE_COUNT} file(s)")
+list(APPEND RECOMP_SOURCES ${PRX_SOURCES})
+
 # ---------------------------------------------------------------------------
 # ps3recomp runtime library
 # ---------------------------------------------------------------------------
@@ -177,6 +188,8 @@ add_executable(${PROJECT_NAME}
     stubs.cpp
     port_extension.cpp
     src/port_resc.c
+    src/port_prx.c
+    ${PRX_DIR}/prx_table.c
     ${PS3RECOMP_SCAFFOLD}
     ${HLE_NID_TABLE}
     ${RECOMP_SOURCES}
@@ -209,6 +222,8 @@ endif()
 
 target_include_directories(${PROJECT_NAME} PRIVATE
     "${RECOMP_DIR}"                            # the generated ppu_recomp.h
+    "${PRX_DIR}"                               # the lifted PRX modules' headers
+    "${CMAKE_CURRENT_SOURCE_DIR}/src"          # port code (port_prx_table.h)
     "${PS3RECOMP_DIR}/include"
     "${PS3RECOMP_DIR}/runtime/ppu"
     "${PS3RECOMP_DIR}/runtime/spu"
