@@ -1,0 +1,19 @@
+# Game data is copyrighted: never commit it
+game/
+*.pkg
+*.rap
+*.edat
+*.elf
+*.ELF
+*.prx
+
+# Third-party binaries
+tools/rpcs3/
+tools/*.7z
+
+# Generated
+out/
+recompiled/
+build/
+.venv/
+__pycache__/
