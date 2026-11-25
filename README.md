@@ -66,6 +66,39 @@ Current result: 22,711 functions lifted into 33 chunks (~2.9M lines), 501 jump t
 
 Build needs **clang-cl** (VS Installer → "C++ Clang tools for Windows") plus CMake and Ninja.
 
+## 4. Build and run
+
+```powershell
+build.bat          # applies patches\ps3recomp\*.patch to the submodule, then CMake + Ninja with clang-cl
+mklink /J game\vfs\PS3_GAME game\base
+run.bat            # PS3_VFS_ROOT=game/vfs, log in out\run.log
+```
+
+Keyboard: Enter = Start, arrows = D-pad, Z = Cross (confirm), X = Circle (back), A = Square, S = Triangle, Q/W = L1/R1.
+
+## Port-specific code
+
+- [src/port_resc.c](src/port_resc.c): cellResc overrides. The game renders 1920x1080 with 2x AA into an offscreen surface and presents it through RESC; this registers RESC's display buffers, makes the surface the backend's scanout and queues the flip into the game's command buffer.
+- [patches/ps3recomp](patches/ps3recomp): changes to the ps3recomp D3D12 backend, kept as a patch until they go upstream:
+  - scaled composite of an offscreen scanout onto the backbuffer;
+  - persistent offscreen scanout, so flips present full frames and clear boundaries do not (this fixed the flicker);
+  - executes a full draw batch instead of dropping draws past `MAX_DRAWS`;
+  - X16 textures are R16_UNORM presented as {A,R,G,B} = {X,1,X,1}, as in RPCS3 (the text strings were white boxes).
+  - texture -> render-target aliases (`rsx_d3d12_alias_texture_to_rt`, `TEX_ALIAS`): the menu UI layer is copied by the CPU from RT 0x02AF9800 to 0x0443C000, which on the host GPU only copied zeros.
+  - culling honours SHADER_WINDOW origin: with origin bottom the front face is flipped (the menu's 3D book pages were culled as back faces).
+  - diagnostics: `RSX_CAP_ALPHA=1` (capture alpha), `RSX_DBG_VTX=<tex offset>` (dump quad vertices), `TEX_ALIAS_OPAQUE=1`.
+- [tools/capture_window.ps1](tools/capture_window.ps1), [tools/flicker_probe.ps1](tools/flicker_probe.ps1): screenshot the game window; sample frames to spot flicker.
+- `RSX_CAP=<frame>:1 RSX_CAP_DIR=out\rsxcap`: the backend's frame capture (every draw, texture format and render target of one frame).
+
+## Status
+
+- Boots, title screen renders correctly with text, no flicker, 60+ FPS, keyboard input works, save data loads.
+- Main menu renders fully (book pages, options, button hints); Local Play works.
+- After Local Play a popup opens with no message text: the game submits no glyph draws for it, and makes no system calls when it opens (under investigation).
+- The license check (`sceNpDrmVerifyUpgradeLicense`) is faked as OK, so the game runs as the full version.
+- Audio: the ATRAC decoder needs the firmware's `flashATRAC.pic`; likely silent.
+- The 118 game PRX modules (characters, enemies) are not loaded yet.
+
 ## Notes
 
 - The game loads its characters, enemies and shots as PRX modules (`dynamic/`, `dlc/*/dll/`). They will need `lift_prx.py` besides the EBOOT.

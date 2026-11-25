@@ -1,0 +1,462 @@
+diff --git a/libs/video/rsx_commands.c b/libs/video/rsx_commands.c
+index 5c337584..fcd879eb 100644
+--- a/libs/video/rsx_commands.c
++++ b/libs/video/rsx_commands.c
+@@ -793,6 +793,15 @@ int rsx_process_method(rsx_state* state, u32 method, u32 data)
+         state->front_face = data;
+         return 0;
+     }
++    if (method == 0x00001D88u) {   /* NV4097_SET_SHADER_WINDOW */
++        if (state->shader_window != data) {
++            static int n = 0;
++            if (n++ < 8) printf("[RSX] SHADER_WINDOW = 0x%08X (origin %s, height %u)\n", data,
++                                ((data >> 12) & 0xF) ? "bottom" : "top", data & 0xFFF);
++        }
++        state->shader_window = data;
++        return 0;
++    }
+ 
+     /* Shader programs */
+     if (method == NV4097_SET_SHADER_PROGRAM) {
+diff --git a/libs/video/rsx_commands.h b/libs/video/rsx_commands.h
+index 246ca166..c0a50c10 100644
+--- a/libs/video/rsx_commands.h
++++ b/libs/video/rsx_commands.h
+@@ -303,6 +303,9 @@ typedef struct rsx_state {
+     int cull_face_enable;
+     u32 cull_face;
+     u32 front_face;
++    /* NV4097_SET_SHADER_WINDOW: bits 0-11 height, 12-15 origin (0 top,
++     * 1 bottom), 16-19 pixel centre. */
++    u32 shader_window;
+ 
+     /* Color mask — bits: [0] B, [8] G, [16] R, [24] A */
+     u32 color_mask;
+diff --git a/libs/video/rsx_d3d12_backend.c b/libs/video/rsx_d3d12_backend.c
+index 90238150..30e6aa79 100644
+--- a/libs/video/rsx_d3d12_backend.c
++++ b/libs/video/rsx_d3d12_backend.c
+@@ -1574,7 +1574,11 @@ static void cap_write_bmp(const char* path, const void* mapped, u32 w, u32 h,
+                 rv = fp[0]; gv = fp[1]; bv = fp[2];
+             } else {
+                 const u8* p = srow + (u64)x * 4;
+-                rv = p[0]/255.0f; gv = p[1]/255.0f; bv = p[2]/255.0f;
++                /* RSX_CAP_ALPHA=1: write the alpha channel as greyscale. */
++                static int _cap_alpha = -1;
++                if (_cap_alpha < 0) { const char* e = getenv("RSX_CAP_ALPHA"); _cap_alpha = e ? atoi(e) : 0; }
++                if (_cap_alpha) { rv = gv = bv = p[3]/255.0f; }
++                else { rv = p[0]/255.0f; gv = p[1]/255.0f; bv = p[2]/255.0f; }
+             }
+             float ar = rv<0?-rv:rv, ag = gv<0?-gv:gv, ab = bv<0?-bv:bv;
+             if (ar>1) ar=1; if (ag>1) ag=1; if (ab>1) ab=1;
+@@ -2090,6 +2094,11 @@ static u32 rsx_cull_key(const rsx_state* st)
+     /* The front face counts with culling off too: two-sided stencil picks its
+      * front and back state by it (shadow volumes are drawn unculled). */
+     u32 k = st->front_face == 0x0901u ? 4u : 0u;                        /* CCW */
++    /* RSX decides front faces in window space. With SHADER_WINDOW origin
++     * BOTTOM that space is GL's (y up) while D3D's is y down, so the screen
++     * winding is mirrored: flip the front face. Castlevania: HoD sets origin
++     * bottom and its menu's 3D book pages were all culled as back faces. */
++    if (((st->shader_window >> 12) & 0xFu) == 1u) k ^= 4u;
+     if (!st->cull_face_enable) return k;
+     k |= 1u;
+     if (st->cull_face == 0x0404u || st->cull_face == 0x0408u) k |= 2u;  /* FRONT */
+@@ -3763,6 +3772,46 @@ static int off_rt_find(u32 off)
+     return -1;
+ }
+ 
++/* Texture -> render-target aliases. A title that copies a rendered surface to
++ * another VRAM address with the CPU or an SPU reads zeros: the surface only
++ * exists on the host GPU. An alias makes a texture bound at `tex` sample the
++ * render target at `rt` instead. Set from port code with
++ * rsx_d3d12_alias_texture_to_rt(), or TEX_ALIAS=tex=rt[,tex=rt...]. */
++#define MAX_TEX_ALIASES 16
++static u32 s_tex_alias_n;
++static u32 s_tex_alias_from[MAX_TEX_ALIASES], s_tex_alias_to[MAX_TEX_ALIASES];
++
++void rsx_d3d12_alias_texture_to_rt(u32 tex_off, u32 rt_off)
++{
++    for (u32 i = 0; i < s_tex_alias_n; i++)
++        if (s_tex_alias_from[i] == tex_off) { s_tex_alias_to[i] = rt_off; return; }
++    if (s_tex_alias_n < MAX_TEX_ALIASES) {
++        s_tex_alias_from[s_tex_alias_n] = tex_off;
++        s_tex_alias_to[s_tex_alias_n++] = rt_off;
++    }
++}
++
++static u32 tex_rt_alias(u32 off)
++{
++    static int parsed = 0;
++    if (!parsed) {
++        parsed = 1;
++        const char* e = getenv("TEX_ALIAS");
++        while (e && *e) {
++            char* end;
++            u32 from = (u32)strtoul(e, &end, 0);
++            if (*end != '=') break;
++            u32 to = (u32)strtoul(end + 1, &end, 0);
++            rsx_d3d12_alias_texture_to_rt(from, to);
++            fprintf(stderr, "[TEX_ALIAS] 0x%08X -> RT 0x%08X\n", from, to);
++            e = (*end == ',') ? end + 1 : NULL;
++        }
++    }
++    for (u32 i = 0; i < s_tex_alias_n; i++)
++        if (s_tex_alias_from[i] == off) return s_tex_alias_to[i];
++    return off;
++}
++
+ /* Ensure an RT resource exists for this surface; (re)creates the RTV at
+  * rt_rtv_heap[i] and the SRV at srv_heap[RT_SRV_BASE+i]. */
+ static int off_rt_get(u32 off, u32 w, u32 h, u32 rsx_fmt)
+@@ -4317,11 +4366,115 @@ static u32 s_last_drawn_off  = 0;
+ 
+ void rsx_d3d12_composite_from_offscreen(u32 raw_off) { s_composite_src = raw_off; }
+ 
++/* Persistent scanout: the offscreen surface a title presents every frame
++ * (cellResc's source). While set, a flip always renders and presents with this
++ * surface composited, and a clear boundary executes its batch without
++ * presenting -- an all-offscreen title otherwise had its flips deferred and was
++ * shown only at clear boundaries, i.e. half-drawn frames: flickering text and
++ * menu items, and now and then a whole blank frame. */
++static u32 s_scanout_offscreen = 0;
++void rsx_d3d12_set_scanout_offscreen(u32 raw_off) { s_scanout_offscreen = raw_off; }
++
++/* Scaled composite: a fullscreen triangle sampling the offscreen RT through the
++ * basic root signature's t0 + linear s0. A plain CopyTextureRegion only works
++ * when the RT is the backbuffer's size; a title that renders at 1920x1080 with
++ * 2x AA (3840x1080 in samples) and presents through cellResc is not, and the
++ * linear filter also resolves its horizontal 2x samples. */
++static ID3D12PipelineState* s_blit_pso;
++static int s_blit_pso_failed;
++
++static int blit_pso_ready(void)
++{
++    if (s_blit_pso) return 1;
++    if (s_blit_pso_failed || !s_d3d.root_signature) return 0;
++    static const char vs_src[] =
++        "struct VO { float4 pos:SV_POSITION; float4 col:COLOR; float2 uv:TEXCOORD; };\n"
++        "VO main(uint id:SV_VertexID) {\n"
++        "  VO o; float2 uv = float2((id << 1) & 2, id & 2);\n"
++        "  o.uv = uv; o.col = float4(1,1,1,1);\n"
++        "  o.pos = float4(uv * float2(2, -2) + float2(-1, 1), 0, 1); return o; }\n";
++    static const char ps_src[] =
++        "Texture2D tex : register(t0);\n"
++        "SamplerState smp : register(s0);\n"
++        "struct VO { float4 pos:SV_POSITION; float4 col:COLOR; float2 uv:TEXCOORD; };\n"
++        "float4 main(VO i) : SV_TARGET { return float4(tex.Sample(smp, i.uv).rgb, 1); }\n";
++    ID3DBlob *vb = NULL, *pb = NULL, *err = NULL;
++    HRESULT hr = D3DCompile(vs_src, sizeof(vs_src) - 1, "blit_vs", NULL, NULL, "main", "vs_5_0", 0, 0, &vb, &err);
++    if (SUCCEEDED(hr))
++        hr = D3DCompile(ps_src, sizeof(ps_src) - 1, "blit_ps", NULL, NULL, "main", "ps_5_0", 0, 0, &pb, &err);
++    if (FAILED(hr)) {
++        fprintf(stderr, "[COMPOSITE] blit shader compile failed: %s\n",
++                err ? (const char*)err->lpVtbl->GetBufferPointer(err) : "?");
++        if (err) err->lpVtbl->Release(err);
++        if (vb) vb->lpVtbl->Release(vb);
++        s_blit_pso_failed = 1;
++        return 0;
++    }
++    D3D12_GRAPHICS_PIPELINE_STATE_DESC pd = {0};
++    pd.pRootSignature = s_d3d.root_signature;
++    pd.VS.pShaderBytecode = vb->lpVtbl->GetBufferPointer(vb);
++    pd.VS.BytecodeLength  = vb->lpVtbl->GetBufferSize(vb);
++    pd.PS.pShaderBytecode = pb->lpVtbl->GetBufferPointer(pb);
++    pd.PS.BytecodeLength  = pb->lpVtbl->GetBufferSize(pb);
++    pd.BlendState.RenderTarget[0].RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
++    pd.SampleMask = UINT_MAX;
++    pd.RasterizerState.FillMode = D3D12_FILL_MODE_SOLID;
++    pd.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
++    pd.RasterizerState.DepthClipEnable = TRUE;
++    pd.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
++    pd.NumRenderTargets = 1;
++    pd.RTVFormats[0] = DXGI_FORMAT_R8G8B8A8_UNORM;
++    pd.SampleDesc.Count = 1;
++    hr = s_d3d.device->lpVtbl->CreateGraphicsPipelineState(
++        s_d3d.device, &pd, &IID_ID3D12PipelineState, (void**)&s_blit_pso);
++    vb->lpVtbl->Release(vb);
++    pb->lpVtbl->Release(pb);
++    if (FAILED(hr)) {
++        fprintf(stderr, "[COMPOSITE] blit PSO creation failed (0x%08lX)\n", (unsigned long)hr);
++        s_blit_pso = NULL;
++        s_blit_pso_failed = 1;
++        return 0;
++    }
++    return 1;
++}
++
++static void composite_scaled(u32 fi, int slot)
++{
++    OffRT* r = &s_d3d.off_rt[slot];
++    off_rt_transition(slot, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
++
++    D3D12_CPU_DESCRIPTOR_HANDLE rtv;
++    s_d3d.rtv_heap->lpVtbl->GetCPUDescriptorHandleForHeapStart(s_d3d.rtv_heap, &rtv);
++    rtv.ptr += fi * s_d3d.rtv_descriptor_size;
++    D3D12_GPU_DESCRIPTOR_HANDLE srv;
++    s_d3d.srv_heap->lpVtbl->GetGPUDescriptorHandleForHeapStart(s_d3d.srv_heap, &srv);
++    srv.ptr += (u64)(RT_SRV_BASE + slot) * s_d3d.srv_inc;
++
++    ID3D12GraphicsCommandList* cl = s_d3d.cmd_list;
++    cl->lpVtbl->OMSetRenderTargets(cl, 1, &rtv, FALSE, NULL);
++    D3D12_VIEWPORT vp = {0, 0, (float)s_d3d.width, (float)s_d3d.height, 0.0f, 1.0f};
++    D3D12_RECT sc = {0, 0, (LONG)s_d3d.width, (LONG)s_d3d.height};
++    cl->lpVtbl->RSSetViewports(cl, 1, &vp);
++    cl->lpVtbl->RSSetScissorRects(cl, 1, &sc);
++    cl->lpVtbl->SetGraphicsRootSignature(cl, s_d3d.root_signature);
++    cl->lpVtbl->SetDescriptorHeaps(cl, 1, &s_d3d.srv_heap);
++    cl->lpVtbl->SetGraphicsRootDescriptorTable(cl, 1, srv);
++    cl->lpVtbl->SetPipelineState(cl, s_blit_pso);
++    cl->lpVtbl->IASetPrimitiveTopology(cl, D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
++    cl->lpVtbl->DrawInstanced(cl, 3, 1, 0, 0);
++
++    { static int n = 0;
++      if (PS3_LOG_FIRST(n, 3))
++          fprintf(stderr, "[COMPOSITE] RT 0x%08X %ux%u -> backbuffer %ux%u (scaled)%c",
++                  r->off, r->w, r->h, s_d3d.width, s_d3d.height, 10); }
++}
++
+ static void composite_present(u32 fi)
+ {
+     u32 want = s_composite_src;
+     s_composite_src = 0;
+-    if (!want) return;
++    if (!want) want = s_scanout_offscreen;
++    if (!want || !s_present_this_frame) return;
+     /* want == 2 means "whatever this frame's draws targeted" -- the one thing
+      * guaranteed to hold geometry, and immune to the offset collision above. */
+     int i;
+@@ -4329,6 +4482,10 @@ static void composite_present(u32 fi)
+     else            { i = off_rt_find(want); }
+     if (i < 0 || !s_d3d.off_rt[i].res) return;
+     OffRT* r = &s_d3d.off_rt[i];
++    if ((r->w != s_d3d.width || r->h != s_d3d.height) && blit_pso_ready()) {
++        composite_scaled(fi, i);
++        return;
++    }
+     /* Same-format copy only; a half-float source would need a converting draw. */
+     if (r->dxgi != DXGI_FORMAT_R8G8B8A8_UNORM) {
+         static int w1 = 0;
+@@ -5032,11 +5189,19 @@ static void render_frame(void)
+                 }
+             }
+             if (dr->tex[_u].set) {
+-                int rt = off_rt_find(dr->tex[_u].raw);
++                const u32 _traw = tex_rt_alias(dr->tex[_u].raw);
++                int rt = off_rt_find(_traw);
+                 if (rt >= 0) {
+                     dr->tex_rt[_u] = rt;
+-                    srv_write(wslot, s_d3d.off_rt[rt].res, (DXGI_FORMAT)s_d3d.off_rt[rt].dxgi,
+-                              D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING);
++                    /* TEX_ALIAS_OPAQUE=1 (experiment): sample an aliased RT
++                     * with alpha forced to 1. */
++                    static int _aop = -1;
++                    if (_aop < 0) { const char* e = getenv("TEX_ALIAS_OPAQUE"); _aop = e ? atoi(e) : 0; }
++                    const UINT _map = (_aop && _traw != dr->tex[_u].raw)
++                        ? D3D12_ENCODE_SHADER_4_COMPONENT_MAPPING(0, 1, 2,
++                              D3D12_SHADER_COMPONENT_MAPPING_FORCE_VALUE_1)
++                        : D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
++                    srv_write(wslot, s_d3d.off_rt[rt].res, (DXGI_FORMAT)s_d3d.off_rt[rt].dxgi, _map);
+                     continue;
+                 }
+                 u32 _bf = dr->tex[_u].fmt & 0x9F;
+@@ -6114,7 +6279,7 @@ static void d3d12_present(void* ud, u32 buffer_id)
+      * it would strobe the bare backbuffer clear. Keep accumulating -- the
+      * composite draw that targets the display presents the whole chain, in
+      * order, in one command list. Empty batches still present (boot/idle). */
+-    int flip_has_display = (s_d3d.draw_count == 0);
++    int flip_has_display = (s_d3d.draw_count == 0) || s_scanout_offscreen != 0;
+     for (u32 _i = 0; _i < s_d3d.draw_count && _i < MAX_DRAWS; _i++)
+         if (!s_d3d.draws[_i].is_clear && s_d3d.draws[_i].rt_off == 0) {
+             flip_has_display = 1;
+@@ -6267,7 +6432,11 @@ static void d3d12_clear(void* ud, u32 flags, u32 color, float depth, u8 stencil)
+         if (blink_dbg())
+             printf("[CLEAR] presenting %u accumulated draws at frame boundary\n",
+                    s_d3d.draw_count);
++        /* With a persistent offscreen scanout the flip presents; a clear
++         * boundary only executes the batch so far. */
++        if (s_scanout_offscreen) s_present_this_frame = 0;
+         render_frame();
++        s_present_this_frame = 1;
+         s_clear_presents++;
+         s_last_clear_presented_flip = s_last_clear_boundary_flip;
+     }
+@@ -6720,6 +6889,23 @@ static u32 upload_quads_vp(const rsx_state* state, u32 first, u32 count)
+                     c[k][0].v[0],c[k][0].v[1],c[k][0].v[2],c[k][0].v[3],
+                     c[k][8].v[0],c[k][8].v[1]);
+               fclose(f); } } }
++        /* RSX_DBG_VTX=<hex tex0 raw offset>: every attribute of the quads that
++         * sample that texture (up to 120 quads). */
++        { static const char* dv = (const char*)1; static u32 want = 0; static int n = 0;
++          if (dv == (const char*)1) { dv = getenv("RSX_DBG_VTX");
++                                      want = dv ? (u32)strtoul(dv, NULL, 16) : 0; }
++          if (want && s_d3d.cur_texs[0].raw == want && n < 120) { n++;
++            fprintf(stderr, "[QUADVTX] #%d first=%u", n, first + q*4);
++            for (u32 k = 0; k < 4; k++) {
++                fprintf(stderr, "\n   v%u", k);
++                for (u32 at = 0; at < 16; at++) {
++                    const float* p = c[k][at].v;
++                    if (at == 0 || p[0] || p[1] || p[2] || p[3])
++                        fprintf(stderr, " a%u=(%.3f,%.3f,%.3f,%.3f)", at, p[0], p[1], p[2], p[3]);
++                }
++            }
++            fprintf(stderr, "%c", 10);
++          } }
+     }
+     s_d3d.vp_vb_offset += o * VP_VERT_STRIDE;
+     return o;
+@@ -6761,11 +6947,16 @@ static u32 upload_tris_vp(const rsx_state* state, u32 first, u32 count)
+     { static const char* dv = (const char*)1; static u32 want = 0; static int n = 0;
+       if (dv == (const char*)1) { dv = getenv("RSX_DBG_VTX");
+                                   want = dv ? (u32)strtoul(dv, NULL, 16) : 0; }
+-      if (want && s_d3d.cur_texs[0].raw == want && n < 6) { n++;
++      if (want && s_d3d.cur_texs[0].raw == want && n < 40) { n++;
+         fprintf(stderr, "[DUCKVTX] first=%u count=%u", first, count);
+-        for (u32 k = 0; k < count && k < 4; k++)
+-            fprintf(stderr, "  v%u=(%.2f,%.2f,%.2f)", k,
+-                    out[k*16].v[0], out[k*16].v[1], out[k*16].v[2]);
++        for (u32 k = 0; k < count && k < 4; k++) {
++            fprintf(stderr, "\n   v%u", k);
++            for (u32 at = 0; at < 16; at++) {
++                const float* q = out[k*16 + at].v;
++                if (at == 0 || q[0] || q[1] || q[2] || q[3])
++                    fprintf(stderr, " a%u=(%.3f,%.3f,%.3f,%.3f)", at, q[0], q[1], q[2], q[3]);
++            }
++        }
+         { int lo = -1, hi = -1, nz = 0;
+           for (int r = 0; r < RSX_MAX_VERTEX_CONSTANTS; r++) {
+               const float* m = state->vertex_constants[r];
+@@ -7272,8 +7463,24 @@ static u32 upload_quad_strip_vp_indexed(const rsx_state* state, u32 first, u32 c
+     return o;
+ }
+ 
++/* A pass with more draws than MAX_DRAWS used to drop the excess (records_full):
++ * Castlevania: HoD's main menu records ~2100 draws between clears, and the
++ * last ones -- the button labels, drawn on top -- never appeared. Execute the
++ * batch so far without presenting, the way a clear boundary does, and keep
++ * recording. Only while a persistent offscreen scanout is set: that is the
++ * mode in which a mid-frame execute is never what gets shown. */
++static void d3d12_flush_if_full(void)
++{
++    if (!s_d3d.initialized || !s_scanout_offscreen) return;
++    if (s_d3d.draw_count + 8u < MAX_DRAWS) return;
++    s_present_this_frame = 0;
++    render_frame();
++    s_present_this_frame = 1;
++}
++
+ static void d3d12_draw_arrays(void* ud, u32 primitive, u32 first, u32 count)
+ {
++    d3d12_flush_if_full();
+     /* RSX_LIVE_FEED_DBG=1: pair with the [feed] method counts so "the FIFO
+      * carries no draw batches" can be checked against "the backend is told
+      * to draw" in the same run. */
+@@ -7541,6 +7748,7 @@ static void d3d12_draw_arrays(void* ud, u32 primitive, u32 first, u32 count)
+ 
+ static void d3d12_draw_indexed(void* ud, u32 primitive, u32 first, u32 count)
+ {
++    d3d12_flush_if_full();
+     /* RSX_LIVE_FEED_DBG=1: pair with the [feed] method counts so "the FIFO
+      * carries no draw batches" can be checked against "the backend is told
+      * to draw" in the same run. */
+diff --git a/libs/video/rsx_texture_formats.h b/libs/video/rsx_texture_formats.h
+index 46944aff..02e1a4ba 100644
+--- a/libs/video/rsx_texture_formats.h
++++ b/libs/video/rsx_texture_formats.h
+@@ -29,8 +29,8 @@ extern "C" {
+ #define RSX_TEXTURE_DEPTH24_D8_FLOAT 0x91
+ #define RSX_TEXTURE_DEPTH16          0x92
+ #define RSX_TEXTURE_DEPTH16_FLOAT    0x93
+-#define RSX_TEXTURE_X16              0x94  /* float16 single channel */
+-#define RSX_TEXTURE_Y16_X16          0x95  /* float16 two channels */
++#define RSX_TEXTURE_X16              0x94  /* unorm16 single channel */
++#define RSX_TEXTURE_Y16_X16          0x95  /* unorm16 two channels */
+ #define RSX_TEXTURE_R5G5B5A1         0x97
+ #define RSX_TEXTURE_W16_Z16_Y16_X16_FLOAT 0x9A
+ #define RSX_TEXTURE_W32_Z32_Y32_X32_FLOAT 0x9B
+@@ -90,6 +90,8 @@ static inline u32 rsx_texture_bpp(u32 format)
+ #define DXGI_FORMAT_B4G4R4A4_UNORM       115
+ #define DXGI_FORMAT_R16_FLOAT_TEX        54
+ #define DXGI_FORMAT_R16G16_FLOAT_TEX     34
++#define DXGI_FORMAT_R16_UNORM_TEX        56
++#define DXGI_FORMAT_R16G16_UNORM_TEX     35
+ #define DXGI_FORMAT_R16G16B16A16_FLOAT_TEX 10
+ #define DXGI_FORMAT_R32_FLOAT_TEX        41
+ #define DXGI_FORMAT_R32G32B32A32_FLOAT_TEX 2
+@@ -112,8 +114,11 @@ static inline u32 rsx_to_dxgi_texture_format(u32 rsx_format)
+     case RSX_TEXTURE_R5G5B5A1:       return DXGI_FORMAT_B5G5R5A1_UNORM;
+     case RSX_TEXTURE_R5G6B5:         return DXGI_FORMAT_B5G6R5_UNORM;
+     case RSX_TEXTURE_A4R4G4B4:       return DXGI_FORMAT_B4G4R4A4_UNORM;
+-    case RSX_TEXTURE_X16:            return DXGI_FORMAT_R16_FLOAT_TEX;
+-    case RSX_TEXTURE_Y16_X16:        return DXGI_FORMAT_R16G16_FLOAT_TEX;
++    /* X16 and Y16_X16 are 16-bit unsigned normalized (RPCS3: R16_UNORM /
++     * R16G16_UNORM); the float variants are the *_FLOAT formats. Read as half
++     * floats, a title's X16 text textures came out as solid white bars. */
++    case RSX_TEXTURE_X16:            return DXGI_FORMAT_R16_UNORM_TEX;
++    case RSX_TEXTURE_Y16_X16:        return DXGI_FORMAT_R16G16_UNORM_TEX;
+     case RSX_TEXTURE_Y16_X16_FLOAT:  return DXGI_FORMAT_R16G16_FLOAT_TEX;
+     case RSX_TEXTURE_W16_Z16_Y16_X16_FLOAT: return DXGI_FORMAT_R16G16B16A16_FLOAT_TEX;
+     case RSX_TEXTURE_X32_FLOAT:      return DXGI_FORMAT_R32_FLOAT_TEX;
+diff --git a/libs/video/rsx_texture_layout.c b/libs/video/rsx_texture_layout.c
+index e79dcd8a..02aa76bf 100644
+--- a/libs/video/rsx_texture_layout.c
++++ b/libs/video/rsx_texture_layout.c
+@@ -371,6 +371,12 @@ void rsx_texture_component_remap(u32 control1, u32 rsx_fmt, u8 out[4])
+     static const u8 lanes_argb[4]  = {3, 0, 1, 2};
+     static const u8 lanes_g8b8[4]  = {1, 0, 1, 0};
+     static const u8 lanes_b8[4]    = {RSX_REMAP_ONE, 0, 0, 0};
++    /* X16 is presented as {A,R,G,B} = {X, 1, X, 1} (RPCS3 VKFormats.cpp
++     * get_component_mapping). Its alpha carries the value: Castlevania:
++     * Harmony of Despair draws every text string as an X16 coverage texture
++     * through the identity crossbar, and with B8's opaque alpha each string
++     * was a solid white box. */
++    static const u8 lanes_x16[4]   = {0, RSX_REMAP_ONE, 0, RSX_REMAP_ONE};
+     static const u8 lanes_depth[4] = {0, 0, 0, 0};
+     /* Y16_X16_FLOAT (0x9F): Y is the high half of the big-endian word, X the
+      * low half, and decode keeps memory order (resource 0 = Y, 1 = X), while
+@@ -379,7 +385,8 @@ void rsx_texture_component_remap(u32 control1, u32 rsx_fmt, u8 out[4])
+     const u32 base = rsx_fmt & 0x9Fu;
+     const u8* src2res = (base == 0x9Fu) ? lanes_y16x16f
+                       : (base == 0x8Bu) ? lanes_g8b8
+-                      : (base == 0x81u || base == 0x94u) ? lanes_b8
++                      : (base == 0x81u) ? lanes_b8
++                      : (base == 0x94u) ? lanes_x16
+                       : (base >= 0x90u && base <= 0x93u) ? lanes_depth : lanes_argb;
+ 
+     if (!(control1 & 0xFFFFu)) control1 = 0xAAE4u;   /* unset -> identity */
+diff --git a/libs/video/tests/test_texture_layout.c b/libs/video/tests/test_texture_layout.c
+index 5b177b83..05ae57a1 100644
+--- a/libs/video/tests/test_texture_layout.c
++++ b/libs/video/tests/test_texture_layout.c
+@@ -744,21 +744,24 @@ static void test_remap_b8_lanes(void)
+     CHECK_EQ(n[G_], 0); CHECK_EQ(n[B_], 0);
+ }
+ 
+-/* X16 decodes to a one-channel R16 resource and is presented like B8: the
+- * value in R, G and B, A opaque. GoW:A's font atlas is X16 sampled through
+- * 0xAAEE (G and B sources only); with the ARGB lanes every output read the
+- * resource's empty G/B components and all text was transparent. */
++/* X16 decodes to a one-channel R16 resource presented as {A,R,G,B} =
++ * {X, 1, X, 1} (RPCS3 get_component_mapping). GoW:A's font atlas is X16
++ * sampled through 0xAAEE (A and G from the G source, R and B from B); with the
++ * ARGB lanes every output read the resource's empty G/B components and all
++ * text was transparent. Castlevania: HoD samples its X16 text through the
++ * identity crossbar and needs the value in alpha, or every string is an
++ * opaque box. */
+ static void test_remap_x16_lanes(void)
+ {
+     u8 m[4];
+     rsx_texture_component_remap(0xAAEEu, FMT_X16 | FMT_LN, m);
+-    CHECK_EQ(m[A_], 0); CHECK_EQ(m[R_], 0);
+-    CHECK_EQ(m[G_], 0); CHECK_EQ(m[B_], 0);
++    CHECK_EQ(m[A_], 0); CHECK_EQ(m[R_], RSX_REMAP_ONE);
++    CHECK_EQ(m[G_], 0); CHECK_EQ(m[B_], RSX_REMAP_ONE);
+ 
+     u8 n[4];
+     rsx_texture_component_remap(0xAAE4u, FMT_X16, n);
+-    CHECK_EQ(n[A_], RSX_REMAP_ONE); CHECK_EQ(n[R_], 0);
+-    CHECK_EQ(n[G_], 0); CHECK_EQ(n[B_], 0);
++    CHECK_EQ(n[A_], 0); CHECK_EQ(n[R_], RSX_REMAP_ONE);
++    CHECK_EQ(n[G_], 0); CHECK_EQ(n[B_], RSX_REMAP_ONE);
+ }
+ 
+ /* The depth formats decode to one channel and present it on every source,

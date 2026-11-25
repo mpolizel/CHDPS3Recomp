@@ -11,6 +11,9 @@ game/
 tools/rpcs3/
 tools/*.7z
 
+# Runtime data (trophies, saves)
+gamedata/
+
 # Generated
 out/
 recompiled/
