@@ -86,14 +86,15 @@ mklink /J game\vfs\PS3_GAME game\base
 run.bat            # PS3_VFS_ROOT=game/vfs, log in out\run.log
 ```
 
-Keyboard: Enter = Start, arrows = D-pad, Z = Cross (confirm), X = Circle (back), A = Square, S = Triangle, Q/W = L1/R1.
+Keyboard: Enter = Start, Tab = Select, arrows = D-pad/left stick, Z = Cross (confirm), X = Circle (back), A = Square, S = Triangle, Q/W = L1/R1, 1/2 = L2/R2, 3/4 = L3/R3, I/J/K/L = right stick. **4 (R3) toggles the in-stage camera zoom** between the whole map and the close view. An Xbox controller replaces the keyboard when connected.
 
 ## Port-specific code
 
-- [src/port_resc.c](src/port_resc.c): cellResc overrides. The game renders 1920x1080 with 2x AA into an offscreen surface and presents it through RESC; this registers RESC's display buffers, makes the surface the backend's scanout and queues the flip into the game's command buffer.
+- [src/port_resc.c](src/port_resc.c): cellResc overrides. The game renders 1920x1080 with 2x AA into an offscreen surface and presents it through RESC; this registers RESC's display buffers, makes the surface the backend's scanout and queues the flip into the game's command buffer. `cellRescSetWaitFlip` really waits for the flip: as a no-op the game ran ahead, the FIFO drain ran past flips, and frames were shown half drawn (HUD, pause menu and player flickering from the lobby on).
 - [patches/ps3recomp](patches/ps3recomp): changes to the ps3recomp D3D12 backend, kept as a patch until they go upstream:
   - scaled composite of an offscreen scanout onto the backbuffer;
-  - persistent offscreen scanout, so flips present full frames and clear boundaries do not (this fixed the flicker);
+  - persistent offscreen scanout, so flips present full frames and clear boundaries do not (this fixed the flicker); the main loop's flip ticker presents at every flip in that mode;
+  - `GCM_CATCHUP_LOG=1` logs each flip the FIFO drain runs past (frames mixed in one present);
   - executes a full draw batch instead of dropping draws past `MAX_DRAWS`;
   - X16 textures are R16_UNORM presented as {A,R,G,B} = {X,1,X,1}, as in RPCS3 (the text strings were white boxes).
   - texture -> render-target aliases (`rsx_d3d12_alias_texture_to_rt`, `TEX_ALIAS`): the menu UI layer is copied by the CPU from RT 0x02AF9800 to 0x0443C000, which on the host GPU only copied zeros.

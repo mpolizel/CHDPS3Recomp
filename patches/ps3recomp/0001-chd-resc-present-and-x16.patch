@@ -1,3 +1,151 @@
+diff --git a/libs/input/cellPad.c b/libs/input/cellPad.c
+index ab241cfa..aab51800 100644
+--- a/libs/input/cellPad.c
++++ b/libs/input/cellPad.c
+@@ -235,6 +235,8 @@ static int pad_key_down(int key) { return (GetAsyncKeyState(key) & 0x8000) != 0;
+ #define PADKEY_W 'W'
+ #define PADKEY_1 '1'
+ #define PADKEY_2 '2'
++#define PADKEY_3 '3'
++#define PADKEY_4 '4'
+ #define PADKEY_RETURN VK_RETURN
+ #define PADKEY_TAB VK_TAB
+ #elif defined(__APPLE__) && !defined(PS3RECOMP_PAD_KEYBOARD_SDL)
+@@ -271,6 +273,8 @@ static int pad_key_down(int key)
+ #define PADKEY_W 13
+ #define PADKEY_1 18
+ #define PADKEY_2 19
++#define PADKEY_3 20
++#define PADKEY_4 21
+ #define PADKEY_RETURN 36
+ #define PADKEY_TAB 48
+ #elif PAD_BACKEND_SDL2
+@@ -297,6 +301,8 @@ static int pad_key_down(int key)
+ #define PADKEY_W SDL_SCANCODE_W
+ #define PADKEY_1 SDL_SCANCODE_1
+ #define PADKEY_2 SDL_SCANCODE_2
++#define PADKEY_3 SDL_SCANCODE_3
++#define PADKEY_4 SDL_SCANCODE_4
+ #define PADKEY_RETURN SDL_SCANCODE_RETURN
+ #define PADKEY_TAB SDL_SCANCODE_TAB
+ #endif
+@@ -326,6 +332,7 @@ static void pad_poll_keyboard(void)
+         { PADKEY_Q,      CELL_PAD_CTRL_L1 },      { PADKEY_W,     CELL_PAD_CTRL_R1 },
+         { PADKEY_1,      CELL_PAD_CTRL_L2 },      { PADKEY_2,     CELL_PAD_CTRL_R2 },
+         { PADKEY_RETURN, CELL_PAD_CTRL_START },   { PADKEY_TAB,   CELL_PAD_CTRL_SELECT },
++        { PADKEY_3,      CELL_PAD_CTRL_L3 },      { PADKEY_4,     CELL_PAD_CTRL_R3 },
+     };
+ 
+     u16 btns = 0;
+@@ -338,7 +345,13 @@ static void pad_poll_keyboard(void)
+                          (btns & CELL_PAD_CTRL_RIGHT) ? 255 : 128);
+     hs->analog_ly = (u8)((btns & CELL_PAD_CTRL_UP) ? 0 :
+                          (btns & CELL_PAD_CTRL_DOWN) ? 255 : 128);
++    /* Right stick on I/J/K/L (Windows only; centred elsewhere). */
++#ifdef _WIN32
++    hs->analog_rx = (u8)(pad_key_down('J') ? 0 : pad_key_down('L') ? 255 : 128);
++    hs->analog_ry = (u8)(pad_key_down('I') ? 0 : pad_key_down('K') ? 255 : 128);
++#else
+     hs->analog_rx = hs->analog_ry = 128;
++#endif
+     hs->trigger_l2 = (u8)((btns & CELL_PAD_CTRL_L2) ? 255 : 0);
+     hs->trigger_r2 = (u8)((btns & CELL_PAD_CTRL_R2) ? 255 : 0);
+ 
+diff --git a/libs/video/cellGcmSys.c b/libs/video/cellGcmSys.c
+index 4929d89c..af846a98 100644
+--- a/libs/video/cellGcmSys.c
++++ b/libs/video/cellGcmSys.c
+@@ -1169,6 +1169,14 @@ static u32 s_fifo_getoff  = 0;
+  * consumed the whole tail. g_gcm_fifo_drained_ea == begin cannot say that on its
+  * own, because it is also begin before the walker has moved at all. */
+ static volatile u32 s_fifo_back_jumps = 0;
++/* The JUMP-to-begin a buffer-full recycle wrote, and whether the walker has
++ * executed that very JUMP. Counting any backward JUMP let the recycle wait end
++ * while the walker was still a long way inside the tail: Castlevania: HoD
++ * jumps backwards within its frames, so the wait ended after ~30 ms with the
++ * walker at 0x1EF40 of a ring written up to 0xFFFCC, the title then wrote
++ * over commands that had not run yet, and the walker lost sync. */
++static volatile u32 s_recycle_jump_io = 0xFFFFFFFFu;
++static volatile int s_recycle_jump_taken = 0;
+ /* Set while the title's buffer-full callback (cellGcm_fifo_recycle) is waiting
+  * for the walker. Its context still reads current == end then, which is exactly
+  * what the drain's own overrun recycle looks for; firing that under the
+@@ -2729,6 +2737,13 @@ static void gcm_rsx_process_fifo_unlocked(void)
+              * commands ahead of it. */
+             if (gcm_fifo_backlog(put, s_fifo_getoff) < GCM_FIFO_CATCHUP_BYTES)
+                 { why = "flip"; break; }
++            /* GCM_CATCHUP_LOG=1: each flip the drain runs past. A title doing
++             * this steadily is not waiting for its flips (no WaitFlip), and
++             * the presents mix two frames. */
++            { static int _n = 0;
++              if (getenv("GCM_CATCHUP_LOG") && _n < 300) { _n++;
++                  fprintf(stderr, "[CATCHUP] past flip: backlog=0x%X get=0x%X put=0x%X%c",
++                          gcm_fifo_backlog(put, s_fifo_getoff), s_fifo_getoff, put, 10); } }
+             continue;
+         }
+ 
+@@ -2785,7 +2800,10 @@ static void gcm_rsx_process_fifo_unlocked(void)
+                   s_park_pass = 1;
+                   break;
+               }
+-              if (tgt < s_fifo_getoff) s_fifo_back_jumps++;
++              if (tgt < s_fifo_getoff) {
++                  s_fifo_back_jumps++;
++                  if (s_fifo_getoff == s_recycle_jump_io) s_recycle_jump_taken = 1;
++              }
+               s_fifo_getoff = tgt;
+               /* get is the RSX's fetch pointer: a title polling it sees the
+                * GPU leave a segment as soon as the JUMP out of it is taken.
+@@ -3383,6 +3401,8 @@ void cellGcm_fifo_recycle(u32 ctx_ea)
+     u32 io_begin = gcm_ea2io(begin);
+     const u32 back_jumps0 = s_fifo_back_jumps;
+     if (io_begin != 0xFFFFFFFFu) {
++        s_recycle_jump_io = gcm_ea2io(current);
++        s_recycle_jump_taken = 0;
+         vm_write32(current, 0x20000000u | io_begin);            /* JUMP begin  */
+         /* The jump has to be in guest memory before `put` moves behind the
+          * walker's `get`. Program order is not enough on arm64: the walker
+@@ -3407,7 +3427,11 @@ void cellGcm_fifo_recycle(u32 ctx_ea)
+     int spins = 0, idle = 0;
+     u32 last_get = s_fifo_getoff;
+     s_fifo_recycle_waiting = 1;
+-    while (io_begin != 0xFFFFFFFFu && s_fifo_back_jumps == back_jumps0 &&
++    /* PS3RECOMP_RECYCLE_ANYJUMP=1: the old condition, any backward JUMP. */
++    static int any_jump = -1;
++    if (any_jump < 0) { const char* e = getenv("PS3RECOMP_RECYCLE_ANYJUMP"); any_jump = e ? atoi(e) : 0; }
++    while (io_begin != 0xFFFFFFFFu &&
++           (any_jump ? s_fifo_back_jumps == back_jumps0 : !s_recycle_jump_taken) &&
+            idle < 2000 && spins < 60000) {
+         Sleep(1); spins++;
+         if (s_fifo_getoff != last_get) { last_get = s_fifo_getoff; idle = 0; }
+@@ -3417,7 +3441,8 @@ void cellGcm_fifo_recycle(u32 ctx_ea)
+                     spins, s_fifo_getoff, vm_read32(GCM_CONTROL_GUEST_ADDR + 0),
+                     s_fifo_back_jumps);
+     }
+-    if (s_fifo_back_jumps == back_jumps0 && io_begin != 0xFFFFFFFFu) {
++    (void)back_jumps0;
++    if (!s_recycle_jump_taken && io_begin != 0xFFFFFFFFu) {
+         static int warned = 0;
+         if (PS3_LOG_FIRST(warned, 4))
+             printf("[cellGcmSys] fifo recycle: drain stalled (drained=0x%08X begin=0x%08X, %d ms)\n",
+@@ -3647,7 +3672,16 @@ static int gcm_flip_into_fifo(u32 ctx, u32 bufferId)
+     const u32 begin = vm_read32(ctx), io_begin = gcm_ea2io(begin);
+     const u32 cb_opd = vm_read32(ctx + 0xC);
+     const int runtime_ring = cb_opd && vm_read32(cb_opd) == GCM_FIFO_CALLBACK_SENTINEL_EA;
+-    if (runtime_ring && !s_seg_size && end - (cur + 4) < GCM_FLIP_WRAP_BYTES && io_begin != 0xFFFFFFFFu &&
++    /* PS3RECOMP_FLIP_NO_WRAP=1: never rewind the title's context here. A title
++     * that holds its write pointer in a register across the flip call
++     * (Castlevania: HoD, through cellRescSetConvertAndFlip) keeps writing at
++     * the old position: it overwrote the flip marker and the JUMP, the walker
++     * ran past the end of the ring and executed data as commands. Its own
++     * buffer-full callback wraps the ring instead. */
++    static int no_wrap = -1;
++    if (no_wrap < 0) { const char* e = getenv("PS3RECOMP_FLIP_NO_WRAP"); no_wrap = e ? atoi(e) : 0; }
++    if (!no_wrap &&
++        runtime_ring && !s_seg_size && end - (cur + 4) < GCM_FLIP_WRAP_BYTES && io_begin != 0xFFFFFFFFu &&
+         s_fifo_getoff >= io_begin + GCM_RECYCLE_MARGIN) {
+         vm_write32(cur + 4, 0x20000000u | io_begin);   /* JUMP -> begin */
+         vm_write32(ctx + 8, begin);
 diff --git a/libs/video/rsx_commands.c b/libs/video/rsx_commands.c
 index 5c337584..fcd879eb 100644
 --- a/libs/video/rsx_commands.c
@@ -33,7 +181,7 @@ index 246ca166..c0a50c10 100644
      /* Color mask — bits: [0] B, [8] G, [16] R, [24] A */
      u32 color_mask;
 diff --git a/libs/video/rsx_d3d12_backend.c b/libs/video/rsx_d3d12_backend.c
-index 90238150..30e6aa79 100644
+index 90238150..cc2088a9 100644
 --- a/libs/video/rsx_d3d12_backend.c
 +++ b/libs/video/rsx_d3d12_backend.c
 @@ -1574,7 +1574,11 @@ static void cap_write_bmp(const char* path, const void* mapped, u32 w, u32 h,
@@ -108,7 +256,7 @@ index 90238150..30e6aa79 100644
  /* Ensure an RT resource exists for this surface; (re)creates the RTV at
   * rt_rtv_heap[i] and the SRV at srv_heap[RT_SRV_BASE+i]. */
  static int off_rt_get(u32 off, u32 w, u32 h, u32 rsx_fmt)
-@@ -4317,11 +4366,115 @@ static u32 s_last_drawn_off  = 0;
+@@ -4317,11 +4366,117 @@ static u32 s_last_drawn_off  = 0;
  
  void rsx_d3d12_composite_from_offscreen(u32 raw_off) { s_composite_src = raw_off; }
  
@@ -120,7 +268,6 @@ index 90238150..30e6aa79 100644
 + * menu items, and now and then a whole blank frame. */
 +static u32 s_scanout_offscreen = 0;
 +void rsx_d3d12_set_scanout_offscreen(u32 raw_off) { s_scanout_offscreen = raw_off; }
-+
 +/* Scaled composite: a fullscreen triangle sampling the offscreen RT through the
 + * basic root signature's t0 + linear s0. A plain CopyTextureRegion only works
 + * when the RT is the backbuffer's size; a title that renders at 1920x1080 with
@@ -221,11 +368,14 @@ index 90238150..30e6aa79 100644
      s_composite_src = 0;
 -    if (!want) return;
 +    if (!want) want = s_scanout_offscreen;
++    { static int n = 0;   /* why a scanout frame shows nothing */
++      if (s_scanout_offscreen && s_present_this_frame && PS3_LOG_FIRST(n, 6))
++          fprintf(stderr, "[COMPOSITE] present: want=0x%08X rt_slot=%d%c", want, off_rt_find(want), 10); }
 +    if (!want || !s_present_this_frame) return;
      /* want == 2 means "whatever this frame's draws targeted" -- the one thing
       * guaranteed to hold geometry, and immune to the offset collision above. */
      int i;
-@@ -4329,6 +4482,10 @@ static void composite_present(u32 fi)
+@@ -4329,6 +4484,10 @@ static void composite_present(u32 fi)
      else            { i = off_rt_find(want); }
      if (i < 0 || !s_d3d.off_rt[i].res) return;
      OffRT* r = &s_d3d.off_rt[i];
@@ -236,7 +386,7 @@ index 90238150..30e6aa79 100644
      /* Same-format copy only; a half-float source would need a converting draw. */
      if (r->dxgi != DXGI_FORMAT_R8G8B8A8_UNORM) {
          static int w1 = 0;
-@@ -5032,11 +5189,19 @@ static void render_frame(void)
+@@ -5032,11 +5191,19 @@ static void render_frame(void)
                  }
              }
              if (dr->tex[_u].set) {
@@ -259,7 +409,7 @@ index 90238150..30e6aa79 100644
                      continue;
                  }
                  u32 _bf = dr->tex[_u].fmt & 0x9F;
-@@ -6114,7 +6279,7 @@ static void d3d12_present(void* ud, u32 buffer_id)
+@@ -6114,7 +6281,7 @@ static void d3d12_present(void* ud, u32 buffer_id)
       * it would strobe the bare backbuffer clear. Keep accumulating -- the
       * composite draw that targets the display presents the whole chain, in
       * order, in one command list. Empty batches still present (boot/idle). */
@@ -268,7 +418,7 @@ index 90238150..30e6aa79 100644
      for (u32 _i = 0; _i < s_d3d.draw_count && _i < MAX_DRAWS; _i++)
          if (!s_d3d.draws[_i].is_clear && s_d3d.draws[_i].rt_off == 0) {
              flip_has_display = 1;
-@@ -6267,7 +6432,11 @@ static void d3d12_clear(void* ud, u32 flags, u32 color, float depth, u8 stencil)
+@@ -6267,7 +6434,11 @@ static void d3d12_clear(void* ud, u32 flags, u32 color, float depth, u8 stencil)
          if (blink_dbg())
              printf("[CLEAR] presenting %u accumulated draws at frame boundary\n",
                     s_d3d.draw_count);
@@ -280,7 +430,7 @@ index 90238150..30e6aa79 100644
          s_clear_presents++;
          s_last_clear_presented_flip = s_last_clear_boundary_flip;
      }
-@@ -6720,6 +6889,23 @@ static u32 upload_quads_vp(const rsx_state* state, u32 first, u32 count)
+@@ -6720,6 +6891,23 @@ static u32 upload_quads_vp(const rsx_state* state, u32 first, u32 count)
                      c[k][0].v[0],c[k][0].v[1],c[k][0].v[2],c[k][0].v[3],
                      c[k][8].v[0],c[k][8].v[1]);
                fclose(f); } } }
@@ -304,7 +454,7 @@ index 90238150..30e6aa79 100644
      }
      s_d3d.vp_vb_offset += o * VP_VERT_STRIDE;
      return o;
-@@ -6761,11 +6947,16 @@ static u32 upload_tris_vp(const rsx_state* state, u32 first, u32 count)
+@@ -6761,11 +6949,16 @@ static u32 upload_tris_vp(const rsx_state* state, u32 first, u32 count)
      { static const char* dv = (const char*)1; static u32 want = 0; static int n = 0;
        if (dv == (const char*)1) { dv = getenv("RSX_DBG_VTX");
                                    want = dv ? (u32)strtoul(dv, NULL, 16) : 0; }
@@ -325,7 +475,7 @@ index 90238150..30e6aa79 100644
          { int lo = -1, hi = -1, nz = 0;
            for (int r = 0; r < RSX_MAX_VERTEX_CONSTANTS; r++) {
                const float* m = state->vertex_constants[r];
-@@ -7272,8 +7463,24 @@ static u32 upload_quad_strip_vp_indexed(const rsx_state* state, u32 first, u32 c
+@@ -7272,8 +7465,24 @@ static u32 upload_quad_strip_vp_indexed(const rsx_state* state, u32 first, u32 c
      return o;
  }
  
@@ -350,7 +500,7 @@ index 90238150..30e6aa79 100644
      /* RSX_LIVE_FEED_DBG=1: pair with the [feed] method counts so "the FIFO
       * carries no draw batches" can be checked against "the backend is told
       * to draw" in the same run. */
-@@ -7541,6 +7748,7 @@ static void d3d12_draw_arrays(void* ud, u32 primitive, u32 first, u32 count)
+@@ -7541,6 +7750,7 @@ static void d3d12_draw_arrays(void* ud, u32 primitive, u32 first, u32 count)
  
  static void d3d12_draw_indexed(void* ud, u32 primitive, u32 first, u32 count)
  {
@@ -358,6 +508,30 @@ index 90238150..30e6aa79 100644
      /* RSX_LIVE_FEED_DBG=1: pair with the [feed] method counts so "the FIFO
       * carries no draw batches" can be checked against "the backend is told
       * to draw" in the same run. */
+@@ -8080,6 +8290,23 @@ void rsx_d3d12_backend_present(void)
+             return;
+     }
+ 
++    /* Offscreen scanout (cellResc): the flip is the frame boundary, so present
++     * at every flip. The ticker takes the flip with the drain stopped on its
++     * marker, so the batch holds exactly the rest of that frame. The old gate
++     * below presented only an EMPTY batch here (has_display never set for a
++     * title that draws no display buffer), i.e. whenever a clear boundary had
++     * just executed part of a frame -- the HUD, pause menu or player missing
++     * for a frame. */
++    if (s_scanout_offscreen) {
++        s_d3d12_stats.flips++;
++        if (s_d3d.initialized) {
++            s_present_this_frame = 1;
++            render_frame();
++        }
++        d3d12_print_stats();
++        return;
++    }
++
+     /* Same display gate as d3d12_present: a batch of offscreen pass work only
+      * (render-to-texture) keeps accumulating until its composite arrives.
+      * Empty batches present only until the first real frame -- after that an
 diff --git a/libs/video/rsx_texture_formats.h b/libs/video/rsx_texture_formats.h
 index 46944aff..02e1a4ba 100644
 --- a/libs/video/rsx_texture_formats.h

@@ -40,9 +40,9 @@
 
 extern void ps3_hle_register_ctx(uint32_t nid, const char* name, void (*fn)(ppu_context*));
 extern s32 cellGcmSetDisplayBuffer(u32 bufferId, u32 offset, u32 pitch, u32 width, u32 height);
-extern s32 cellGcmSetFlipCommand(u32 bufferId);
 extern s32 cellGcmAddressToOffset(u32 address, u32* offset);
 extern s32 _cellGcmSetFlipCommand(void* ctx, u32 bufferId);
+extern void cellGcmSetWaitFlip(void);
 extern void rsx_d3d12_set_scanout_offscreen(u32 raw_off);
 
 #define RESC_DISPLAY_BUFFERS 2
@@ -187,6 +187,8 @@ static void resc_set_convert_and_flip(ppu_context* ctx)
     }
     const u32 con = (u32)ctx->gpr[3];
     rsx_d3d12_set_scanout_offscreen(s_src[idx].offset);
+    /* Queued into the game's command buffer, as real RESC does. A direct
+     * cellGcmSetFlipCommand here left the game waiting at its boot screens. */
     _cellGcmSetFlipCommand((void*)(uintptr_t)con, s_flip_target);
     s_flip_target = (s_flip_target + 1) % s_display_count;
     if (s_flip_handler_opd)
@@ -201,9 +203,14 @@ static void resc_set_flip_handler(ppu_context* ctx)
     ctx->gpr[3] = CELL_OK;
 }
 
-/* void cellRescSetWaitFlip(CellGcmContextData* con): the flip is synchronous here. */
+/* void cellRescSetWaitFlip(CellGcmContextData* con): wait for the queued flip
+ * to be shown, as libgcm's WaitFlip does. As a no-op the game ran unthrottled,
+ * the FIFO piled up hundreds of KB past its flips and the drain ran across
+ * frame boundaries, so a present showed the next frame half drawn: the HUD,
+ * the pause menu and the player flickered from the lobby on. */
 static void resc_set_wait_flip(ppu_context* ctx)
 {
+    cellGcmSetWaitFlip();
     ctx->gpr[3] = CELL_OK;
 }
 

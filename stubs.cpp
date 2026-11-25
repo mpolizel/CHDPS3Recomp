@@ -11,6 +11,7 @@
  */
 
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 
 #include "ps3emu/ps3types.h"
@@ -44,6 +45,18 @@ extern "C" void ps3_load_prx_modules(void)
      * 0x03C53000 from the Local Play lobby on. */
     rsx_d3d12_alias_texture_to_rt(0x0443C000u, 0x02AF9800u);
     rsx_d3d12_alias_texture_to_rt(0x03C53000u, 0x02AF9800u);
+
+    /* The game keeps its command-buffer write pointer in a register across
+     * cellRescSetConvertAndFlip, so the runtime must not rewind its context
+     * to `begin` when it queues the flip near the end of the ring (see
+     * gcm_flip_into_fifo). Read lazily, at the first flip. */
+    if (!getenv("PS3RECOMP_FLIP_NO_WRAP")) {
+#ifdef _WIN32
+        _putenv("PS3RECOMP_FLIP_NO_WRAP=1");
+#else
+        setenv("PS3RECOMP_FLIP_NO_WRAP", "1", 0);
+#endif
+    }
 }
 
 /* ---------------------------------------------------------------------------
