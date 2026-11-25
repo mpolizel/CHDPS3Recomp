@@ -95,6 +95,7 @@ Keyboard: Enter = Start, Tab = Select, arrows = D-pad/left stick, Z = Cross (con
   - scaled composite of an offscreen scanout onto the backbuffer;
   - persistent offscreen scanout, so flips present full frames and clear boundaries do not (this fixed the flicker); the main loop's flip ticker presents at every flip in that mode;
   - `GCM_CATCHUP_LOG=1` logs each flip the FIFO drain runs past (frames mixed in one present);
+  - `cellFsReaddir` clears the entry at the end of a directory: the game read the stale last name again, listed each DLC folder's last file twice (its player module eight times), built 29 character entries for 12 and the character-select panel overran its 16 slots and ran the heap out of memory ("Change Characters" closed the game);
   - executes a full draw batch instead of dropping draws past `MAX_DRAWS`;
   - X16 textures are R16_UNORM presented as {A,R,G,B} = {X,1,X,1}, as in RPCS3 (the text strings were white boxes).
   - texture -> render-target aliases (`rsx_d3d12_alias_texture_to_rt`, `TEX_ALIAS`): the menu UI layer is copied by the CPU from RT 0x02AF9800 to 0x0443C000, which on the host GPU only copied zeros.

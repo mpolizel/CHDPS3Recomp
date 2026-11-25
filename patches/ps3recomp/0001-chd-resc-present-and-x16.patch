@@ -634,6 +634,30 @@ index 5b177b83..05ae57a1 100644
  }
  
  /* The depth formats decode to one channel and present it on every source,
+diff --git a/runtime/ppu/ppu_fs.cpp b/runtime/ppu/ppu_fs.cpp
+index 76fc1973..5b27e903 100644
+--- a/runtime/ppu/ppu_fs.cpp
++++ b/runtime/ppu/ppu_fs.cpp
+@@ -822,7 +822,18 @@ static void cellFsReaddir(ppu_context* ctx)
+     DIR* d = fd_dir(fd);
+     if (!d) { ctx->gpr[3] = (uint64_t)(int64_t)CELL_FS_EBADF; return; }
+     struct dirent* e = readdir(d);
+-    if (!e) { if (nread_ptr) vm_write64(nread_ptr, 0); ctx->gpr[3] = CELL_OK; return; }
++    /* End of directory: nread 0 and an empty entry. Left untouched, the entry
++     * still held the last name, and a title that reads the name before it
++     * checks nread took it again: Castlevania HoD listed the last file of
++     * every DLC folder twice (its player module eight times, through the
++     * nested folders), built a character list of 29 for 12 characters, and
++     * the character-select panel ran past its 16 slots and out of memory. */
++    if (!e) {
++        if (nread_ptr) vm_write64(nread_ptr, 0);
++        if (dirent) { vm_base[dirent + 0] = 0; vm_base[dirent + 1] = 0; vm_base[dirent + 2] = 0; }
++        ctx->gpr[3] = CELL_OK;
++        return;
++    }
+     char full[1300]; struct stat st;
+     snprintf(full, sizeof full, "%s/%s", g_dir_path[fd], e->d_name);
+     /* "." and ".." are always directories: a title that walks a tree skips the
 diff --git a/runtime/ppu/ppu_loader.cpp b/runtime/ppu/ppu_loader.cpp
 index 341b7105..d66db8ea 100644
 --- a/runtime/ppu/ppu_loader.cpp
