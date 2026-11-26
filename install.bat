@@ -11,7 +11,9 @@ rem A release package carries its own Python (python\) and a patched ps3recomp.
 set PY=python\python.exe
 if exist %PY% goto run
 
-if not exist ext\ps3recomp\tools\ppu_lifter.py (
+if not exist ext\ps3recomp\tools\ppu_lifter.py set NEED_SUBMODULES=1
+if not exist ext\rl-achievements\sdk\CMakeLists.txt set NEED_SUBMODULES=1
+if defined NEED_SUBMODULES (
     git submodule update --init || exit /b 1
 )
 set PY=.venv\Scripts\python.exe
