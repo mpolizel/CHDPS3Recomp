@@ -272,6 +272,55 @@ def step_firmware(a):
     say("firmware decoder installed")
 
 
+# The build's inputs: the port, the runtime and the achievements SDK (not the
+# translated game, which only the installer itself writes).
+SOURCE_ROOTS = ["CMakeLists.txt", "main.cpp", "stubs.cpp", "port_extension.cpp", "port_extension.h",
+                "guest_arena.h", "config.toml", "cmake", "src", "ext/ps3recomp/CMakeLists.txt",
+                "ext/ps3recomp/cmake", "ext/ps3recomp/include", "ext/ps3recomp/runtime",
+                "ext/ps3recomp/libs", "ext/rl-achievements/sdk"]
+SOURCE_HASHES = os.path.join(GAME, "source_hashes.json")
+SOURCE_EXT = (".c", ".cpp", ".h", ".hpp", ".inc", ".txt", ".cmake", ".toml")
+
+
+def _source_files():
+    for r in SOURCE_ROOTS:
+        full = os.path.join(ROOT, r)
+        if os.path.isfile(full):
+            yield r.replace("\\", "/"), full
+        elif os.path.isdir(full):
+            for dp, _, fs in os.walk(full):
+                for f in fs:
+                    if f.lower().endswith(SOURCE_EXT):
+                        p = os.path.join(dp, f)
+                        yield os.path.relpath(p, ROOT).replace(os.sep, "/"), p
+
+
+def mark_changed_sources():
+    """Touch every build input whose content differs from the last build's, so
+    an update's files are rebuilt whatever their dates. With no record of the
+    last build (an install from before 0.0.4), touch every source and build
+    file but not the headers: those would rebuild the whole translated game,
+    and a header change always comes with the sources that use it."""
+    try:
+        old = json.load(open(SOURCE_HASHES, encoding="utf-8"))
+    except (OSError, ValueError):
+        old = None
+    new, changed = {}, 0
+    for rel, full in _source_files():
+        h = hashlib.sha1(open(full, "rb").read()).hexdigest()
+        new[rel] = h
+        if old is None:
+            touch = not rel.lower().endswith((".h", ".hpp", ".inc"))
+        else:
+            touch = old.get(rel) != h
+        if touch:
+            os.utime(full, None)
+            changed += 1
+    os.makedirs(GAME, exist_ok=True)
+    json.dump(new, open(SOURCE_HASHES, "w", encoding="utf-8"), indent=0)
+    return changed
+
+
 def apply_patches():
     """Apply patches/ps3recomp/*.patch to a clean submodule (as build.bat does).
     The lifters need them too, not only the build: lift_prx.py's relocations
@@ -544,16 +593,16 @@ def main():
 
     t0 = time.time()
     try:
-        # A new version unzipped over an installed one: its port sources keep
-        # the zip's dates, which can be older than the objects built from the
-        # previous version, so mark them changed; the build step always runs
-        # (with nothing to do it takes seconds) so the game picks them up.
+        # A new version unzipped over an installed one: its files keep the
+        # zip's dates, which can be older than what the previous version built,
+        # so neither Ninja nor CMake would see them changed. Compare contents
+        # with what was built last time and mark exactly the changed files
+        # (mark_changed_sources); the build step always runs (seconds when
+        # there is nothing to do).
         version = open(os.path.join(ROOT, "version.txt")).read().strip()
         if st.get("version") != version:
-            for rel in ["main.cpp", "stubs.cpp", "port_extension.cpp"] +                        [os.path.join("src", f) for f in os.listdir(os.path.join(ROOT, "src"))]:
-                full = os.path.join(ROOT, rel)
-                if os.path.isfile(full):
-                    os.utime(full, None)
+            n = mark_changed_sources()
+            say(f"version {version}: {n} changed source files to rebuild")
             st["version"] = version
             save_state(st)
         for n, (sid, title, fn) in enumerate(STEPS, 1):
