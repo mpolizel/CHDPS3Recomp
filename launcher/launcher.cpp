@@ -711,8 +711,15 @@ static void draw_menu(float t)
     const float item_x = cx - 30, anchor = row_y + 130, step = 62;
     for (size_t i = 0; i < c.items.size(); ++i) {
         float rel = (float)i - c.pos;
-        float y = rel >= 0 ? anchor + rel * step + (rel > 0.5f ? 34 : rel * 68)
-                           : row_y - 74 + rel * step;   // passed items move above the row
+        // The selected item sits at the anchor, the next ones below it (one
+        // description line further down), the passed ones above the icon row.
+        // Continuous in rel, so the easing never strands an item between the
+        // two places (it used to: the first item, eased back to a hair below
+        // zero, was drawn above the row while still selected).
+        const float above = row_y - 74;
+        float y = rel >= 0 ? anchor + rel * step + std::min(rel, 0.5f) * 68
+                : rel > -1 ? anchor + rel * (anchor - above)
+                           : above + (rel + 1) * step;
         bool sel = (int)i == c.sel;
         float a = sel ? 1.0f : (rel < 0 ? 0.35f : 0.6f);
         if (sel) {
@@ -862,7 +869,11 @@ static void render()
 
     // ease the animated positions towards their targets
     g_cat_pos += (g_cat - g_cat_pos) * 0.2f;
-    for (auto& c : g_cats) c.pos += (c.sel - c.pos) * 0.22f;
+    if (fabsf(g_cat - g_cat_pos) < 0.002f) g_cat_pos = (float)g_cat;
+    for (auto& c : g_cats) {
+        c.pos += (c.sel - c.pos) * 0.22f;
+        if (fabsf(c.sel - c.pos) < 0.002f) c.pos = (float)c.sel;   // land exactly
+    }
 
     draw_header();
     if (g_mode == Mode::Installing) {
