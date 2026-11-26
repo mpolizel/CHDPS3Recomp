@@ -167,10 +167,31 @@ index 4929d89c..af846a98 100644
          vm_write32(cur + 4, 0x20000000u | io_begin);   /* JUMP -> begin */
          vm_write32(ctx + 8, begin);
 diff --git a/libs/video/rsx_commands.c b/libs/video/rsx_commands.c
-index 5c337584..fcd879eb 100644
+index 5c337584..8529ea3f 100644
 --- a/libs/video/rsx_commands.c
 +++ b/libs/video/rsx_commands.c
-@@ -793,6 +793,15 @@ int rsx_process_method(rsx_state* state, u32 method, u32 data)
+@@ -219,6 +219,11 @@ static int process_surface_method(rsx_state* state, u32 method, u32 data)
+  *   Unit N: 0x1A00 + N*0x20 .. 0x1A1C + N*0x20
+  * -----------------------------------------------------------------------*/
+ 
++/* Texture-bind / draw trace for one stretch of the stream, armed by the D3D12
++ * backend's rsxcap.trigger capture (diagnostic: which texture each draw of
++ * the next frames really had bound, in order). */
++int g_rsx_texlog = 0;
++
+ static int process_texture_method(rsx_state* state, u32 method, u32 data)
+ {
+     /* Compute texture unit index and register offset within the unit */
+@@ -234,6 +239,8 @@ static int process_texture_method(rsx_state* state, u32 method, u32 data)
+     switch (reg) {
+     case 0x00: /* TEXTURE_OFFSET */
+         tex->offset = data & 0x7FFFFFFFu;   /* 31-bit offset; bit 31 is not an address bit */
++        if (g_rsx_texlog > 0 && unit == 0) { g_rsx_texlog--;
++            fprintf(stderr, "[texlog] tex0=0x%08X%c", tex->offset, 10); }
+         break;
+     case 0x04: /* TEXTURE_FORMAT */
+         tex->format = data;
+@@ -793,6 +800,15 @@ int rsx_process_method(rsx_state* state, u32 method, u32 data)
          state->front_face = data;
          return 0;
      }
@@ -186,6 +207,17 @@ index 5c337584..fcd879eb 100644
  
      /* Shader programs */
      if (method == NV4097_SET_SHADER_PROGRAM) {
+@@ -860,6 +876,10 @@ int rsx_process_method(rsx_state* state, u32 method, u32 data)
+ 
+     /* Draw */
+     if (method == NV4097_SET_BEGIN_END) {
++        if (data != 0 && g_rsx_texlog > 0) { g_rsx_texlog--;
++            fprintf(stderr, "[texlog] draw fp=0x%08X tex0=0x%08X fmt=0x%08X rect=0x%08X%c",
++                    state->shader_program, state->textures[0].offset, state->textures[0].format,
++                    state->textures[0].image_rect, 10); }
+         if (data != 0) {
+             state->primitive_type = data;
+             state->in_begin_end = 1;
 diff --git a/libs/video/rsx_commands.h b/libs/video/rsx_commands.h
 index 246ca166..c0a50c10 100644
 --- a/libs/video/rsx_commands.h
@@ -201,7 +233,7 @@ index 246ca166..c0a50c10 100644
      /* Color mask — bits: [0] B, [8] G, [16] R, [24] A */
      u32 color_mask;
 diff --git a/libs/video/rsx_d3d12_backend.c b/libs/video/rsx_d3d12_backend.c
-index 90238150..63ecd686 100644
+index 90238150..50548a5f 100644
 --- a/libs/video/rsx_d3d12_backend.c
 +++ b/libs/video/rsx_d3d12_backend.c
 @@ -77,6 +77,7 @@
@@ -225,7 +257,18 @@ index 90238150..63ecd686 100644
              }
              float ar = rv<0?-rv:rv, ag = gv<0?-gv:gv, ab = bv<0?-bv:bv;
              if (ar>1) ar=1; if (ag>1) ag=1; if (ab>1) ab=1;
-@@ -2090,6 +2095,11 @@ static u32 rsx_cull_key(const rsx_state* st)
+@@ -1668,6 +1673,10 @@ static void cap_readback_write(ID3D12Resource* res, u32 w, u32 h, u32 dxgi,
+     rb->lpVtbl->Release(rb);
+ }
+ 
++/* Set by the rsxcap.trigger capture: RSX_DBG_VTX dumps the quads of the
++ * frames after it again, so a glitch seen late in a game can be inspected. */
++static int s_dbgvtx_rearm = 0;
++
+ static void rsx_capture_frame(u32 fi, u32 ndraws, u32 capidx)
+ {
+     char dir[300]; const char* base = getenv("RSX_CAP_DIR");
+@@ -2090,6 +2099,11 @@ static u32 rsx_cull_key(const rsx_state* st)
      /* The front face counts with culling off too: two-sided stencil picks its
       * front and back state by it (shadow volumes are drawn unculled). */
      u32 k = st->front_face == 0x0901u ? 4u : 0u;                        /* CCW */
@@ -237,7 +280,7 @@ index 90238150..63ecd686 100644
      if (!st->cull_face_enable) return k;
      k |= 1u;
      if (st->cull_face == 0x0404u || st->cull_face == 0x0408u) k |= 2u;  /* FRONT */
-@@ -2447,7 +2457,24 @@ static ID3D12PipelineState* vp_get_fp_pso(int vs_idx, u32 fp_addr, u32 blend, in
+@@ -2447,7 +2461,24 @@ static ID3D12PipelineState* vp_get_fp_pso(int vs_idx, u32 fp_addr, u32 blend, in
      static int ctrl_auto = -1;
      if (ctrl_auto < 0) ctrl_auto = getenv("RSX_FP_CTRL_AUTO") ? 1 : 0;
      u32 fp_ctrl = ctrl_auto ? RSX_FP_CTRL_AUTO : ctrl;
@@ -263,7 +306,7 @@ index 90238150..63ecd686 100644
      if (n <= 0) { static int _e=0; if(PS3_LOG_FIRST(_e, 16)) printf("[FP] decompile fail (fp=0x%08X)\n", fp_addr); return NULL; }
      if (unnorm_mask) {
          rsx_fp_apply_unnorm_scale(hlsl, sizeof(hlsl), unnorm_mask, (const u32 (*)[3])unnorm_dim, cube_mask, 0);
-@@ -3541,8 +3568,16 @@ static void vp_record_cb(u32 slot, int vs_idx, const D3D12DrawRecord* dr)
+@@ -3541,8 +3572,16 @@ static void vp_record_cb(u32 slot, int vs_idx, const D3D12DrawRecord* dr)
              extern u32 cellGcmResolveLocated(int, u32);
              u32 foff = cellGcmResolveLocated((dr->fp_addr & 0x3u) == 1,
                                               dr->fp_addr & ~0x3u);
@@ -282,7 +325,7 @@ index 90238150..63ecd686 100644
              /* FPK_DBG=1: the fragment constants as the shader will see them.
               * A program whose only output is fp_k[0].xxxx renders black if
               * those constants never arrive, which looks identical from the
-@@ -3763,6 +3798,46 @@ static int off_rt_find(u32 off)
+@@ -3763,6 +3802,46 @@ static int off_rt_find(u32 off)
      return -1;
  }
  
@@ -329,7 +372,7 @@ index 90238150..63ecd686 100644
  /* Ensure an RT resource exists for this surface; (re)creates the RTV at
   * rt_rtv_heap[i] and the SRV at srv_heap[RT_SRV_BASE+i]. */
  static int off_rt_get(u32 off, u32 w, u32 h, u32 rsx_fmt)
-@@ -4317,11 +4392,117 @@ static u32 s_last_drawn_off  = 0;
+@@ -4317,11 +4396,117 @@ static u32 s_last_drawn_off  = 0;
  
  void rsx_d3d12_composite_from_offscreen(u32 raw_off) { s_composite_src = raw_off; }
  
@@ -448,7 +491,7 @@ index 90238150..63ecd686 100644
      /* want == 2 means "whatever this frame's draws targeted" -- the one thing
       * guaranteed to hold geometry, and immune to the offset collision above. */
      int i;
-@@ -4329,6 +4510,10 @@ static void composite_present(u32 fi)
+@@ -4329,6 +4514,10 @@ static void composite_present(u32 fi)
      else            { i = off_rt_find(want); }
      if (i < 0 || !s_d3d.off_rt[i].res) return;
      OffRT* r = &s_d3d.off_rt[i];
@@ -459,7 +502,7 @@ index 90238150..63ecd686 100644
      /* Same-format copy only; a half-float source would need a converting draw. */
      if (r->dxgi != DXGI_FORMAT_R8G8B8A8_UNORM) {
          static int w1 = 0;
-@@ -5032,11 +5217,19 @@ static void render_frame(void)
+@@ -5032,11 +5221,19 @@ static void render_frame(void)
                  }
              }
              if (dr->tex[_u].set) {
@@ -482,7 +525,28 @@ index 90238150..63ecd686 100644
                      continue;
                  }
                  u32 _bf = dr->tex[_u].fmt & 0x9F;
-@@ -6114,7 +6307,7 @@ static void d3d12_present(void* ud, u32 buffer_id)
+@@ -6017,6 +6214,20 @@ skip_dump_consider: ;
+             }
+         }
+       } }
++    /* On demand: create rsxcap.trigger in the working directory and the next
++     * frame is captured (into $RSX_CAP_DIR or rsxcap/, numbered from 50), the
++     * trigger removed. For a glitch that shows only at one place in a game,
++     * where a frame number can't be known in advance. Checked twice a second. */
++    { static u32 s_trig_idx = 50;
++      if ((s_d3d.frame_count % 30) == 0 && s_dbg_last_draws > 0 &&
++          GetFileAttributesA("rsxcap.trigger") != INVALID_FILE_ATTRIBUTES) {
++          DeleteFileA("rsxcap.trigger");
++          rsx_capture_frame(fi, s_dbg_last_draws, s_trig_idx++);
++          s_dbgvtx_rearm = 1;
++          { extern int g_rsx_texlog; g_rsx_texlog = 6000; }
++          fprintf(stderr, "[rsxcap] captured frame %llu on trigger%c",
++                  (unsigned long long)s_d3d.frame_count, 10);
++      } }
+ 
+     /* Present, on the vblank unless D3D12_VSYNC=0: that one is for measuring a
+      * title past the display's rate. Skipped for an offscreen-only batch. */
+@@ -6114,7 +6325,7 @@ static void d3d12_present(void* ud, u32 buffer_id)
       * it would strobe the bare backbuffer clear. Keep accumulating -- the
       * composite draw that targets the display presents the whole chain, in
       * order, in one command list. Empty batches still present (boot/idle). */
@@ -491,7 +555,7 @@ index 90238150..63ecd686 100644
      for (u32 _i = 0; _i < s_d3d.draw_count && _i < MAX_DRAWS; _i++)
          if (!s_d3d.draws[_i].is_clear && s_d3d.draws[_i].rt_off == 0) {
              flip_has_display = 1;
-@@ -6267,7 +6460,11 @@ static void d3d12_clear(void* ud, u32 flags, u32 color, float depth, u8 stencil)
+@@ -6267,7 +6478,11 @@ static void d3d12_clear(void* ud, u32 flags, u32 color, float depth, u8 stencil)
          if (blink_dbg())
              printf("[CLEAR] presenting %u accumulated draws at frame boundary\n",
                     s_d3d.draw_count);
@@ -503,7 +567,7 @@ index 90238150..63ecd686 100644
          s_clear_presents++;
          s_last_clear_presented_flip = s_last_clear_boundary_flip;
      }
-@@ -6720,6 +6917,23 @@ static u32 upload_quads_vp(const rsx_state* state, u32 first, u32 count)
+@@ -6720,6 +6935,25 @@ static u32 upload_quads_vp(const rsx_state* state, u32 first, u32 count)
                      c[k][0].v[0],c[k][0].v[1],c[k][0].v[2],c[k][0].v[3],
                      c[k][8].v[0],c[k][8].v[1]);
                fclose(f); } } }
@@ -512,6 +576,8 @@ index 90238150..63ecd686 100644
 +        { static const char* dv = (const char*)1; static u32 want = 0; static int n = 0;
 +          if (dv == (const char*)1) { dv = getenv("RSX_DBG_VTX");
 +                                      want = dv ? (u32)strtoul(dv, NULL, 16) : 0; }
++          if (s_dbgvtx_rearm) { s_dbgvtx_rearm = 0; n = 0;
++              fprintf(stderr, "[QUADVTX] re-armed by the capture trigger%c", 10); }
 +          if (want && s_d3d.cur_texs[0].raw == want && n < 120) { n++;
 +            fprintf(stderr, "[QUADVTX] #%d first=%u", n, first + q*4);
 +            for (u32 k = 0; k < 4; k++) {
@@ -527,7 +593,7 @@ index 90238150..63ecd686 100644
      }
      s_d3d.vp_vb_offset += o * VP_VERT_STRIDE;
      return o;
-@@ -6761,11 +6975,16 @@ static u32 upload_tris_vp(const rsx_state* state, u32 first, u32 count)
+@@ -6761,11 +6995,16 @@ static u32 upload_tris_vp(const rsx_state* state, u32 first, u32 count)
      { static const char* dv = (const char*)1; static u32 want = 0; static int n = 0;
        if (dv == (const char*)1) { dv = getenv("RSX_DBG_VTX");
                                    want = dv ? (u32)strtoul(dv, NULL, 16) : 0; }
@@ -548,7 +614,7 @@ index 90238150..63ecd686 100644
          { int lo = -1, hi = -1, nz = 0;
            for (int r = 0; r < RSX_MAX_VERTEX_CONSTANTS; r++) {
                const float* m = state->vertex_constants[r];
-@@ -7272,8 +7491,24 @@ static u32 upload_quad_strip_vp_indexed(const rsx_state* state, u32 first, u32 c
+@@ -7272,8 +7511,24 @@ static u32 upload_quad_strip_vp_indexed(const rsx_state* state, u32 first, u32 c
      return o;
  }
  
@@ -573,7 +639,7 @@ index 90238150..63ecd686 100644
      /* RSX_LIVE_FEED_DBG=1: pair with the [feed] method counts so "the FIFO
       * carries no draw batches" can be checked against "the backend is told
       * to draw" in the same run. */
-@@ -7541,6 +7776,7 @@ static void d3d12_draw_arrays(void* ud, u32 primitive, u32 first, u32 count)
+@@ -7541,6 +7796,7 @@ static void d3d12_draw_arrays(void* ud, u32 primitive, u32 first, u32 count)
  
  static void d3d12_draw_indexed(void* ud, u32 primitive, u32 first, u32 count)
  {
@@ -581,7 +647,21 @@ index 90238150..63ecd686 100644
      /* RSX_LIVE_FEED_DBG=1: pair with the [feed] method counts so "the FIFO
       * carries no draw batches" can be checked against "the backend is told
       * to draw" in the same run. */
-@@ -8080,6 +8316,23 @@ void rsx_d3d12_backend_present(void)
+@@ -7779,7 +8035,12 @@ static void d3d12_bind_texture(void* ud, u32 unit, const rsx_texture_state* tex)
+           * decodes: X16 (God of War: Ascension's 256x256 font atlas -- without
+           * it every glyph drew as a solid quad), Y16_X16, X32_FLOAT and
+           * Y16_X16_FLOAT (its post-process intermediates). */
+-         base_fmt == 0x94 || base_fmt == 0x95 || base_fmt == 0x9C || base_fmt == 0x9F)) {
++         base_fmt == 0x94 || base_fmt == 0x95 || base_fmt == 0x9C || base_fmt == 0x9F ||
++         /* The 16-bit colour formats rsx_texture_layout decodes: A1R5G5B5,
++          * A4R4G4B4, R5G6B5 and D1R5G5B5. Left out, a draw with one kept the
++          * texture of the draw before: Castlevania HoD's HUD plate (A1R5G5B5,
++          * drawn after the button-prompt text) showed the font atlas. */
++         base_fmt == 0x82 || base_fmt == 0x83 || base_fmt == 0x84 || base_fmt == 0x9D)) {
+         /* TEX_RESOLVE_AUTO=1: resolve through the page tables (local-page map
+          * then IO table) instead of trusting the format's location bits. A
+          * texture the guest built in main memory but tagged local resolves to
+@@ -8080,6 +8341,23 @@ void rsx_d3d12_backend_present(void)
              return;
      }
  

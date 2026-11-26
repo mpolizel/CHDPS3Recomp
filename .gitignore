@@ -36,3 +36,5 @@ launcher.ini
 config.ini
 dist/
 /dlc/
+rsxcap/
+rsxcap.trigger
