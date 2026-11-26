@@ -85,6 +85,13 @@ list(APPEND RECOMP_SOURCES ${PRX_SOURCES})
 # imported one arrives without SDL2, pthreads, the Metal frameworks or the
 # Winsock/XInput imports -- the link then fails on every platform for a
 # different reason. add_subdirectory hands all of that over with the target.
+#
+# llvm-mingw targets Windows 7 by default (_WIN32_WINNT 0x601), which hides
+# APIs the runtime uses (GetCurrentThreadStackLimits is Windows 8+). D3D12
+# needs Windows 10 anyway.
+if(MINGW)
+    add_compile_definitions(_WIN32_WINNT=0x0A00 WINVER=0x0A00)
+endif()
 add_subdirectory("${PS3RECOMP_DIR}" "${CMAKE_BINARY_DIR}/ps3recomp_sdk"
                  EXCLUDE_FROM_ALL)
 
@@ -255,6 +262,18 @@ if(WIN32)
         gdi32
         winmm
     )
+    # MinGW ignores the runtime's #pragma comment(lib), so name those here.
+    if(MINGW)
+        target_link_libraries(${PROJECT_NAME} PRIVATE
+            d3d12 dxgi d3dcompiler bcrypt ws2_32)
+        # libc++ and libunwind go into the exe, which then needs only DLLs
+        # that ship with Windows 10/11 (the UCRT included).
+        target_link_options(${PROJECT_NAME} PRIVATE -static)
+        # No console window for the player: a GUI-subsystem exe (main() still
+        # the entry point). main.cpp sends its output to out/run.log when no
+        # one captures it.
+        set_target_properties(${PROJECT_NAME} PROPERTIES WIN32_EXECUTABLE TRUE)
+    endif()
 endif()
 
 # ---------------------------------------------------------------------------

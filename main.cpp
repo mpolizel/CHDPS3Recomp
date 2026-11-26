@@ -41,6 +41,7 @@
 #include "port_extension.h"   /* optional build extensions (PORT_EXTENSIONS) */
 
 #include <atomic>
+#include <cstdlib>   /* std::atexit */
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -426,8 +427,59 @@ static void port_extension_stop_once(void)
     if (auto stop = port_extension()->stop) stop();
 }
 
+#ifdef _WIN32
+/* The installer's build is a windowless (GUI-subsystem) exe, so the player
+ * sees no console. With nowhere to print, stdout and stderr go to
+ * <install>/out/run.log; a parent that captures them (a terminal redirect,
+ * the launcher) keeps them. Started with no arguments, as by a double-click,
+ * it runs the installed game: the EBOOT and the VFS root are found from the
+ * exe's own folder (build-mingw/ or build/, one level under the install). */
+static char g_default_elf[1024];
+
+static void port_windowless_setup(int* argc, char*** argv)
+{
+    char dir[MAX_PATH];
+    DWORD n = GetModuleFileNameA(NULL, dir, sizeof dir);
+    if (n == 0 || n >= sizeof dir) return;
+    for (char* p = dir; *p; p++) if (*p == '\\') *p = '/';
+    if (char* s = strrchr(dir, '/')) *s = 0;          /* exe folder */
+    if (char* s = strrchr(dir, '/')) *s = 0;          /* install root */
+    /* Saves (gamedata/), logs and the relative paths of the runtime live in
+     * the install: started from anywhere else (a shortcut, the launcher, a
+     * double-click), they would land in that folder instead. */
+    SetCurrentDirectoryA(dir);
+
+    HANDLE err = GetStdHandle(STD_ERROR_HANDLE);
+    if (err == NULL || err == INVALID_HANDLE_VALUE) {
+        char log[MAX_PATH + 32];
+        snprintf(log, sizeof log, "%s/out", dir);
+        CreateDirectoryA(log, NULL);
+        snprintf(log, sizeof log, "%s/out/run.log", dir);
+        if (freopen(log, "w", stdout)) setvbuf(stdout, NULL, _IOLBF, 4096);
+        if (freopen(log, "a", stderr)) setvbuf(stderr, NULL, _IONBF, 0);
+    }
+    if (*argc < 2) {
+        static char* args[3];
+        snprintf(g_default_elf, sizeof g_default_elf, "%s/game/decrypted/USRDIR/EBOOT.elf", dir);
+        args[0] = (*argv)[0];
+        args[1] = g_default_elf;
+        args[2] = NULL;
+        *argc = 2;
+        *argv = args;
+        if (!getenv("PS3_VFS_ROOT")) {
+            char vfs[MAX_PATH + 32];
+            snprintf(vfs, sizeof vfs, "%s/game/vfs", dir);
+            _putenv_s("PS3_VFS_ROOT", vfs);
+        }
+    }
+}
+#endif
+
 int main(int argc, char** argv)
 {
+#ifdef _WIN32
+    port_windowless_setup(&argc, &argv);
+#endif
     if (argc < 2) {
         printf("usage: %s <PPU ELF>\n", argv[0]);
         return 2;

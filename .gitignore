@@ -19,6 +19,7 @@ out/
 recompiled/
 recompiled_prx/
 build/
+build-mingw/
 .venv/
 __pycache__/
 spu/
@@ -28,3 +29,4 @@ spu_images/
 cache/
 dev_flash/
 licenses/
+python/

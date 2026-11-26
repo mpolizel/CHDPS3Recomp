@@ -32,5 +32,12 @@
     "Testing the stages and the DLC characters",
     "Online and local multiplayer"
   ],
+  "launchers": [
+    {
+      "path": "recomplauncher.json",
+      "in": "repo",
+      "format": "RecompLauncher"
+    }
+  ],
   "notes": "No game data or keys are included. The player supplies their own PSN package (and .rap licence for the full version) and the game is built on their PC. Chapter 1 plays with sound and music; the PS3 firmware's ATRAC decoder is downloaded from Sony during setup."
 }

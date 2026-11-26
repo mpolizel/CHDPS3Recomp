@@ -2,13 +2,44 @@
 
 Static recompilation of *Castlevania: Harmony of Despair* (PSN, **NPUB30505**, USA) to native Windows, built with [ps3recomp](https://github.com/sp00nznet/ps3recomp) (submodule in `ext/ps3recomp`).
 
+> [!IMPORTANT]
+> **Windows only.** This version runs on Windows 10 and 11 (64-bit). There are no Linux or macOS builds.
+
+> [!IMPORTANT]
+> **For the full game you need two files of your own: the game and its licence.**
+> - **The game:** the PSN package `UP0101-NPUB30505_00-CASTHARMONYOFDES.pkg`.
+> - **The licence (key):** `UP0101-NPUB30505_00-CVHDZDLCZUNLOCKZ.rap`, from the purchase of the full version.
+>
+> With the package alone you get only the trial. No game files or keys are included here.
+
+## Minimum requirements
+
+| | |
+|---|---|
+| System | Windows 10 or 11, 64-bit |
+| Processor | 64-bit (x86-64) with SSE4.1 |
+| Graphics | DirectX 12 capable GPU (feature level 11_0) |
+| Memory | 8 GB RAM |
+| Disk | about 6 GB free during installation |
+| Internet | during installation: the PS3 firmware (from Sony) and the build tools, about 500 MB |
+
+Installation takes about 15 to 30 minutes, depending on the PC. It happens once.
+
+## Support
+
+If you enjoy this project, you can support it here: [Buy me a coffee](https://buymeacoffee.com/mpolizel) ☕
+
 ## Install
 
-You need the game's PSN package and, for the full version, its `.rap` licence. Then run:
+Install through [RecompLauncher](https://recomplauncher.com): pick the package and, for the full game, the `.rap`. It runs the installer with no console window ([recomplauncher.json](recomplauncher.json)).
+
+From a copy of this repository, run:
 
 ```powershell
-install.bat <UP0101-NPUB30505_00-CASTHARMONYOFDES.pkg> [licence.rap]
+install.bat <UP0101-NPUB30505_00-CASTHARMONYOFDES.pkg> [UP0101-NPUB30505_00-CVHDZDLCZUNLOCKZ.rap]
 ```
+
+Once it's done, open `build-mingw\CHDPS3Recomp.exe` to play. It needs no arguments and opens no console; its log goes to `out\run.log`.
 
 The installer ([tools/install.py](tools/install.py)) does the rest:
 1. Checks the package.
@@ -17,7 +48,13 @@ The installer ([tools/install.py](tools/install.py)) does the rest:
 4. Downloads the PS3 firmware from Sony's servers and keeps only its ATRAC decoder.
 5. Translates the game to C++ and builds it.
 
-If it stops, run it again and it picks up where it left off. It needs Git, Python 3 and Visual Studio with "C++ Clang tools for Windows". The first build takes about 45 minutes.
+If it stops, run it again and it picks up where it left off. Nothing opens a console window: every tool runs hidden, and the progress goes to `out\install.log`.
+
+From this repository the installer needs Git and Python 3. A release package carries a portable Python in `python/` ([tools/bundle_python.py](tools/bundle_python.py): python.org's embeddable build plus the tools' packages), and RecompLauncher runs the installer on its `pythonw.exe`. Visual Studio is not needed.
+
+The installer downloads a portable toolchain into `cache/toolchain`, pinned and checked by SHA-256: [llvm-mingw](https://github.com/mstorsjo/llvm-mingw), CMake and Ninja. It builds into `build-mingw/`. libc++ is linked statically, so the exe needs only DLLs that ship with Windows 10/11 (no Visual C++ Redistributable).
+
+A full install takes about 20 minutes. `build.bat` (Visual Studio clang-cl, into `build/`) remains for development.
 
 No keys are in the repository. `ps3crypt.py` reads them from RPCS3's public `key_vault.cpp`/`.h`, downloaded at install time. The game's own klicensee is read from the player's EBOOT.
 
