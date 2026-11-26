@@ -76,7 +76,29 @@ The game loads its characters, enemies and shots as 118 PRX modules at run time.
 
 At run time [src/port_prx.c](src/port_prx.c) answers `sys_prx_load_module` by copying the module image to its base and registering its functions, calls `module_start` for `sys_prx_start_module`, and implements the 12 `sys_libc` functions the modules import.
 
-## 5. Build and run
+## 5. Lift the audio SPU program
+
+All sound goes through Multistream, whose mixer is an SPU program embedded in the EBOOT (69,140 bytes at file offset 0xAF4480). Extract it and lift it to C:
+
+```powershell
+.venv\Scripts\python ext\ps3recomp\tools\extract_spu_images.py game\decrypted\USRDIR\EBOOT.elf --output spu_images
+.venv\Scripts\python ext\ps3recomp\tools\build_spu_workloads.py --images spu_images --lifted spu --out spu\spu_workloads.c --constructor
+```
+
+`spu_images/` and `spu/` come from the game and are not in the repo. CMake picks up `spu/*/spu_recomp.c` and `spu/spu_workloads.c`.
+
+### PS3 firmware (music)
+
+The music is ATRAC3. Multistream decodes it with the firmware's `flashATRAC.pic`, which it reads from `/dev_flash` and loads into the SPU at run time. Sony distributes the firmware for free:
+
+1. Download `PS3UPDAT.PUP` from https://www.playstation.com/en-us/support/hardware/ps3/system-software/.
+2. In RPCS3 (`tools\rpcs3\rpcs3.exe`), choose **File → Install Firmware** and select the file.
+
+At startup the port looks for `dev_flash` in `tools/rpcs3/`, `rpcs3/` or on its own, next to the executable, one level above it, and under the working directory. `PS3_DEV_FLASH=<dir>` overrides the search. The decoder runs in the SPU interpreter (`SPU_INTERP_UNLIFTED=1`, on by default). No lift exists for code loaded at run time.
+
+Without the firmware, the SPU stops at the first music stream and there is no sound at all. `SPU_NULL_CALL_RETURN=1` keeps the sound effects alive (the music streams then buzz).
+
+## 6. Build and run
 
 The first build takes about 45 minutes (the EBOOT plus 118 modules, ~850 MB of generated C++).
 
@@ -95,12 +117,16 @@ Keyboard: Enter = Start, Tab = Select, arrows = D-pad/left stick, Z = Cross (con
   - scaled composite of an offscreen scanout onto the backbuffer;
   - persistent offscreen scanout, so flips present full frames and clear boundaries do not (this fixed the flicker); the main loop's flip ticker presents at every flip in that mode;
   - `GCM_CATCHUP_LOG=1` logs each flip the FIFO drain runs past (frames mixed in one present);
+  - fragment-program inline constants go to `fp_constants[]` in b1, filled per draw, instead of HLSL literals: the pipeline cache is keyed on the code alone, so every draw of a program used the constants of the first one compiled and all eight colours on the character colour screen were the same palette (`FP_LITERAL=1` restores the literals);
   - `cellFsReaddir` clears the entry at the end of a directory: the game read the stale last name again, listed each DLC folder's last file twice (its player module eight times), built 29 character entries for 12 and the character-select panel overran its 16 slots and ran the heap out of memory ("Change Characters" closed the game);
   - executes a full draw batch instead of dropping draws past `MAX_DRAWS`;
   - X16 textures are R16_UNORM presented as {A,R,G,B} = {X,1,X,1}, as in RPCS3 (the text strings were white boxes).
   - texture -> render-target aliases (`rsx_d3d12_alias_texture_to_rt`, `TEX_ALIAS`): the menu UI layer is copied by the CPU from RT 0x02AF9800 to 0x0443C000, which on the host GPU only copied zeros.
   - culling honours SHADER_WINDOW origin: with origin bottom the front face is flipped (the menu's 3D book pages were culled as back faces).
   - diagnostics: `RSX_CAP_ALPHA=1` (capture alpha), `RSX_DBG_VTX=<tex offset>` (dump quad vertices), `TEX_ALIAS_OPAQUE=1`.
+  - `SPU_NULL_CALL_RETURN=1`: an SPU call through a null function pointer returns 0 instead of stopping the SPU.
+- [stubs.cpp](stubs.cpp): finds the installed firmware (`PS3_DEV_FLASH`) and turns on `SPU_INTERP_UNLIFTED` for the ATRAC decoder.
+- [src/port_debug.c](src/port_debug.c): `CHD_DEBUG=<file>` starts a debug console that reads commands from that file and writes the answers to `<file>.out`: `mem <ea> [len]`, `dump <ea> <len> <host path>` and `poke8 <ea> <val>` (addresses in hex).
 - [tools/capture_window.ps1](tools/capture_window.ps1), [tools/flicker_probe.ps1](tools/flicker_probe.ps1): screenshot the game window; sample frames to spot flicker.
 - `RSX_CAP=<frame>:1 RSX_CAP_DIR=out\rsxcap`: the backend's frame capture (every draw, texture format and render target of one frame).
 
@@ -110,7 +136,7 @@ Keyboard: Enter = Start, Tab = Select, arrows = D-pad/left stick, Z = Cross (con
 - Main menu, Local Play lobby and the PSN notice render fully.
 - **Chapter 1 loads and plays** with Soma: HUD, timer and enemies run, keyboard controls the character.
 - The license check (`sceNpDrmVerifyUpgradeLicense`) is faked as OK, so the game runs as the full version.
-- Audio: the ATRAC decoder needs the firmware's `flashATRAC.pic`; likely silent.
+- Audio works when the PS3 firmware is installed (see step 5): sound effects and voices (PS-ADPCM, decoded by Multistream itself) and the music (ATRAC3, decoded by the firmware). Without the firmware there is no sound.
 - ps3recomp's `lift_prx.py` gained the REL24/REL14/ADDR64/ADDR16_LO_DS relocations (and a corrected REL64) the game's modules use.
 
 ## Notes

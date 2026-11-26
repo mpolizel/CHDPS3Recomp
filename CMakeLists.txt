@@ -189,6 +189,7 @@ add_executable(${PROJECT_NAME}
     port_extension.cpp
     src/port_resc.c
     src/port_prx.c
+    src/port_debug.c
     ${PRX_DIR}/prx_table.c
     ${PS3RECOMP_SCAFFOLD}
     ${HLE_NID_TABLE}

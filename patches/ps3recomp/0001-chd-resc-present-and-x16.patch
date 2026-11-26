@@ -181,10 +181,18 @@ index 246ca166..c0a50c10 100644
      /* Color mask — bits: [0] B, [8] G, [16] R, [24] A */
      u32 color_mask;
 diff --git a/libs/video/rsx_d3d12_backend.c b/libs/video/rsx_d3d12_backend.c
-index 90238150..cc2088a9 100644
+index 90238150..63ecd686 100644
 --- a/libs/video/rsx_d3d12_backend.c
 +++ b/libs/video/rsx_d3d12_backend.c
-@@ -1574,7 +1574,11 @@ static void cap_write_bmp(const char* path, const void* mapped, u32 w, u32 h,
+@@ -77,6 +77,7 @@
+ /* b1 per-draw FP slot: rsx_texscale[4] + rsx_alphatest + fp_k[64]
+  * = 69 float4 = 1104 B, rounded to D3D12's 256-byte CBV alignment. */
+ #define VP_FPCB_STRIDE    1280
++#define VP_FP_MAX_K         64   /* fp_k slots; + fp_alpha = float4 #69 of 80 */
+ #define VERTEX_STRIDE       36  /* bytes per host vertex: pos3 + col4 + uv2 */
+ 
+ typedef struct {
+@@ -1574,7 +1575,11 @@ static void cap_write_bmp(const char* path, const void* mapped, u32 w, u32 h,
                  rv = fp[0]; gv = fp[1]; bv = fp[2];
              } else {
                  const u8* p = srow + (u64)x * 4;
@@ -197,7 +205,7 @@ index 90238150..cc2088a9 100644
              }
              float ar = rv<0?-rv:rv, ag = gv<0?-gv:gv, ab = bv<0?-bv:bv;
              if (ar>1) ar=1; if (ag>1) ag=1; if (ab>1) ab=1;
-@@ -2090,6 +2094,11 @@ static u32 rsx_cull_key(const rsx_state* st)
+@@ -2090,6 +2095,11 @@ static u32 rsx_cull_key(const rsx_state* st)
      /* The front face counts with culling off too: two-sided stencil picks its
       * front and back state by it (shadow volumes are drawn unculled). */
      u32 k = st->front_face == 0x0901u ? 4u : 0u;                        /* CCW */
@@ -209,7 +217,52 @@ index 90238150..cc2088a9 100644
      if (!st->cull_face_enable) return k;
      k |= 1u;
      if (st->cull_face == 0x0404u || st->cull_face == 0x0408u) k |= 2u;  /* FRONT */
-@@ -3763,6 +3772,46 @@ static int off_rt_find(u32 off)
+@@ -2447,7 +2457,24 @@ static ID3D12PipelineState* vp_get_fp_pso(int vs_idx, u32 fp_addr, u32 blend, in
+     static int ctrl_auto = -1;
+     if (ctrl_auto < 0) ctrl_auto = getenv("RSX_FP_CTRL_AUTO") ? 1 : 0;
+     u32 fp_ctrl = ctrl_auto ? RSX_FP_CTRL_AUTO : ctrl;
+-    int n = rsx_fp_decompile(vm_base + off, 4096, fp_ctrl, hlsl, sizeof(hlsl));
++    /* Inline constants as fp_constants[] in b1, filled per draw at record time
++     * (vp_record_cb), not as HLSL literals. The pipeline is keyed on the code
++     * alone (rsx_fp_code_hash), so with literals every draw of a program got
++     * the constants of whichever draw compiled it first: Castlevania HoD picks
++     * a character's palette row with a patched constant, and all eight colours
++     * on its colour-select screen came out the same. b1 starts with
++     * rsx_texscale[4] + rsx_alphatest, hence the five-float4 head.
++     * FP_LITERAL=1 restores the literal constants. */
++    static int fp_literal = -1;
++    if (fp_literal < 0) fp_literal = getenv("FP_LITERAL") ? 1 : 0;
++    u32 fp_kcount = 0;
++    int n = fp_literal ? -1
++          : rsx_fp_decompile_buffered_ex(vm_base + off, 4096, fp_ctrl, 0u, hlsl, sizeof(hlsl), &fp_kcount);
++    if (n > 0 && fp_kcount <= VP_FP_MAX_K)
++        hlsl_replace_all(hlsl, sizeof hlsl, "cbuffer PSConstants : register(b1) {\n",
++                         "cbuffer PSConstants : register(b1) {\n    float4 _rsx_b1_head[5];\n");
++    else
++        n = rsx_fp_decompile(vm_base + off, 4096, fp_ctrl, hlsl, sizeof(hlsl));
+     if (n <= 0) { static int _e=0; if(PS3_LOG_FIRST(_e, 16)) printf("[FP] decompile fail (fp=0x%08X)\n", fp_addr); return NULL; }
+     if (unnorm_mask) {
+         rsx_fp_apply_unnorm_scale(hlsl, sizeof(hlsl), unnorm_mask, (const u32 (*)[3])unnorm_dim, cube_mask, 0);
+@@ -3541,8 +3568,16 @@ static void vp_record_cb(u32 slot, int vs_idx, const D3D12DrawRecord* dr)
+             extern u32 cellGcmResolveLocated(int, u32);
+             u32 foff = cellGcmResolveLocated((dr->fp_addr & 0x3u) == 1,
+                                              dr->fp_addr & ~0x3u);
+-            if (vm_base && foff != 0xFFFFFFFFu)
+-                rsx_fp_extract_consts(vm_base + foff, 4096, &ts[20], 64);   /* fp_k[64] */
++            /* Same walk as the buffered decompiler (rsx_fp_collect_constants),
++             * so slot i here is fp_constants[i] there. The float4 after the
++             * last constant is the decompiler's fp_alpha (_rsx_wpos): zero,
++             * which is the host position, as the literal path had it. */
++            static rsx_fp_constant_block kb;
++            int kn = (vm_base && foff != 0xFFFFFFFFu)
++                   ? rsx_fp_collect_constants(vm_base + foff, 4096, &kb) : -1;
++            if (kn < 0 || kn > VP_FP_MAX_K) kn = 0;
++            memcpy(&ts[20], kb.values, (size_t)kn * 16);
++            memset(&ts[20 + kn * 4], 0, (size_t)(VP_FP_MAX_K + 1 - kn) * 16);
+             /* FPK_DBG=1: the fragment constants as the shader will see them.
+              * A program whose only output is fp_k[0].xxxx renders black if
+              * those constants never arrive, which looks identical from the
+@@ -3763,6 +3798,46 @@ static int off_rt_find(u32 off)
      return -1;
  }
  
@@ -256,7 +309,7 @@ index 90238150..cc2088a9 100644
  /* Ensure an RT resource exists for this surface; (re)creates the RTV at
   * rt_rtv_heap[i] and the SRV at srv_heap[RT_SRV_BASE+i]. */
  static int off_rt_get(u32 off, u32 w, u32 h, u32 rsx_fmt)
-@@ -4317,11 +4366,117 @@ static u32 s_last_drawn_off  = 0;
+@@ -4317,11 +4392,117 @@ static u32 s_last_drawn_off  = 0;
  
  void rsx_d3d12_composite_from_offscreen(u32 raw_off) { s_composite_src = raw_off; }
  
@@ -375,7 +428,7 @@ index 90238150..cc2088a9 100644
      /* want == 2 means "whatever this frame's draws targeted" -- the one thing
       * guaranteed to hold geometry, and immune to the offset collision above. */
      int i;
-@@ -4329,6 +4484,10 @@ static void composite_present(u32 fi)
+@@ -4329,6 +4510,10 @@ static void composite_present(u32 fi)
      else            { i = off_rt_find(want); }
      if (i < 0 || !s_d3d.off_rt[i].res) return;
      OffRT* r = &s_d3d.off_rt[i];
@@ -386,7 +439,7 @@ index 90238150..cc2088a9 100644
      /* Same-format copy only; a half-float source would need a converting draw. */
      if (r->dxgi != DXGI_FORMAT_R8G8B8A8_UNORM) {
          static int w1 = 0;
-@@ -5032,11 +5191,19 @@ static void render_frame(void)
+@@ -5032,11 +5217,19 @@ static void render_frame(void)
                  }
              }
              if (dr->tex[_u].set) {
@@ -409,7 +462,7 @@ index 90238150..cc2088a9 100644
                      continue;
                  }
                  u32 _bf = dr->tex[_u].fmt & 0x9F;
-@@ -6114,7 +6281,7 @@ static void d3d12_present(void* ud, u32 buffer_id)
+@@ -6114,7 +6307,7 @@ static void d3d12_present(void* ud, u32 buffer_id)
       * it would strobe the bare backbuffer clear. Keep accumulating -- the
       * composite draw that targets the display presents the whole chain, in
       * order, in one command list. Empty batches still present (boot/idle). */
@@ -418,7 +471,7 @@ index 90238150..cc2088a9 100644
      for (u32 _i = 0; _i < s_d3d.draw_count && _i < MAX_DRAWS; _i++)
          if (!s_d3d.draws[_i].is_clear && s_d3d.draws[_i].rt_off == 0) {
              flip_has_display = 1;
-@@ -6267,7 +6434,11 @@ static void d3d12_clear(void* ud, u32 flags, u32 color, float depth, u8 stencil)
+@@ -6267,7 +6460,11 @@ static void d3d12_clear(void* ud, u32 flags, u32 color, float depth, u8 stencil)
          if (blink_dbg())
              printf("[CLEAR] presenting %u accumulated draws at frame boundary\n",
                     s_d3d.draw_count);
@@ -430,7 +483,7 @@ index 90238150..cc2088a9 100644
          s_clear_presents++;
          s_last_clear_presented_flip = s_last_clear_boundary_flip;
      }
-@@ -6720,6 +6891,23 @@ static u32 upload_quads_vp(const rsx_state* state, u32 first, u32 count)
+@@ -6720,6 +6917,23 @@ static u32 upload_quads_vp(const rsx_state* state, u32 first, u32 count)
                      c[k][0].v[0],c[k][0].v[1],c[k][0].v[2],c[k][0].v[3],
                      c[k][8].v[0],c[k][8].v[1]);
                fclose(f); } } }
@@ -454,7 +507,7 @@ index 90238150..cc2088a9 100644
      }
      s_d3d.vp_vb_offset += o * VP_VERT_STRIDE;
      return o;
-@@ -6761,11 +6949,16 @@ static u32 upload_tris_vp(const rsx_state* state, u32 first, u32 count)
+@@ -6761,11 +6975,16 @@ static u32 upload_tris_vp(const rsx_state* state, u32 first, u32 count)
      { static const char* dv = (const char*)1; static u32 want = 0; static int n = 0;
        if (dv == (const char*)1) { dv = getenv("RSX_DBG_VTX");
                                    want = dv ? (u32)strtoul(dv, NULL, 16) : 0; }
@@ -475,7 +528,7 @@ index 90238150..cc2088a9 100644
          { int lo = -1, hi = -1, nz = 0;
            for (int r = 0; r < RSX_MAX_VERTEX_CONSTANTS; r++) {
                const float* m = state->vertex_constants[r];
-@@ -7272,8 +7465,24 @@ static u32 upload_quad_strip_vp_indexed(const rsx_state* state, u32 first, u32 c
+@@ -7272,8 +7491,24 @@ static u32 upload_quad_strip_vp_indexed(const rsx_state* state, u32 first, u32 c
      return o;
  }
  
@@ -500,7 +553,7 @@ index 90238150..cc2088a9 100644
      /* RSX_LIVE_FEED_DBG=1: pair with the [feed] method counts so "the FIFO
       * carries no draw batches" can be checked against "the backend is told
       * to draw" in the same run. */
-@@ -7541,6 +7750,7 @@ static void d3d12_draw_arrays(void* ud, u32 primitive, u32 first, u32 count)
+@@ -7541,6 +7776,7 @@ static void d3d12_draw_arrays(void* ud, u32 primitive, u32 first, u32 count)
  
  static void d3d12_draw_indexed(void* ud, u32 primitive, u32 first, u32 count)
  {
@@ -508,7 +561,7 @@ index 90238150..cc2088a9 100644
      /* RSX_LIVE_FEED_DBG=1: pair with the [feed] method counts so "the FIFO
       * carries no draw batches" can be checked against "the backend is told
       * to draw" in the same run. */
-@@ -8080,6 +8290,23 @@ void rsx_d3d12_backend_present(void)
+@@ -8080,6 +8316,23 @@ void rsx_d3d12_backend_present(void)
              return;
      }
  
@@ -671,6 +724,34 @@ index 341b7105..d66db8ea 100644
  #define PPU_HASH_SIZE (1u << PPU_HASH_BITS)
  #define PPU_HASH_MASK (PPU_HASH_SIZE - 1)
  
+diff --git a/runtime/spu/spu_channels.c b/runtime/spu/spu_channels.c
+index 623f285b..49de6e18 100644
+--- a/runtime/spu/spu_channels.c
++++ b/runtime/spu/spu_channels.c
+@@ -2910,6 +2910,23 @@ void spu_indirect_branch(spu_context* ctx)
+         if (p0 + 3 < SPU_LS_SIZE) {
+             uint32_t w = ((uint32_t)ctx->ls[p0] << 24) | ((uint32_t)ctx->ls[p0+1] << 16) |
+                          ((uint32_t)ctx->ls[p0+2] << 8) | ctx->ls[p0+3];
++            /* SPU_NULL_CALL_RETURN=1: a bisl through a null function pointer
++             * returns 0 to its caller instead of halting the SPU. Castlevania
++             * HoD's MultiStream calls its ATRAC3 decoder through a pointer that
++             * stays 0 when the firmware's flashATRAC.pic is missing; halting
++             * there took every other sound (the ADPCM effects) down with the
++             * music. The ATRAC streams themselves still mix garbage (a buzz), so
++             * this keeps effects alive for testing rather than fixing music. */
++            if ((w >> 21) == 0u && p0 == 0 && ctx->host_depth > 0 &&
++                getenv("SPU_NULL_CALL_RETURN")) {
++                static int _nn = 0;
++                if (PS3_LOG_FIRST(_nn, 4))
++                    fprintf(stderr, "[spu] img=%d call to LS 0 (null pointer) skipped, back to 0x%05X\n",
++                            ctx->image_id, ctx->gpr[0]._u32[0] & SPU_LS_MASK);
++                ctx->pc = ctx->gpr[0]._u32[0] & SPU_LS_MASK;
++                memset(&ctx->gpr[3], 0, sizeof ctx->gpr[3]);
++                return;
++            }
+             if ((w >> 21) == 0u) {                 /* stop / stopd */
+                 ctx->stop_code = w & 0x3FFFu;
+                 static int _n = 0;
 diff --git a/tools/lift_prx.py b/tools/lift_prx.py
 index 9fca6d5c..f6c76603 100644
 --- a/tools/lift_prx.py

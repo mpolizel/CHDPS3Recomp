@@ -21,3 +21,5 @@ recompiled_prx/
 build/
 .venv/
 __pycache__/
+spu/
+spu_images/
