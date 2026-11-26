@@ -599,10 +599,15 @@ def main():
         # with what was built last time and mark exactly the changed files
         # (mark_changed_sources); the build step always runs (seconds when
         # there is nothing to do).
+        # Every run, not only when version.txt changes: a state that disagrees
+        # with version.txt must not let changed files go unbuilt. Hashing the
+        # inputs takes well under a second.
         version = open(os.path.join(ROOT, "version.txt")).read().strip()
-        if st.get("version") != version:
+        if "build" in st.get("done", []) or os.path.exists(SOURCE_HASHES):
             n = mark_changed_sources()
-            say(f"version {version}: {n} changed source files to rebuild")
+            if n:
+                say(f"version {version}: {n} changed source files to rebuild")
+        if st.get("version") != version:
             st["version"] = version
             save_state(st)
         for n, (sid, title, fn) in enumerate(STEPS, 1):
