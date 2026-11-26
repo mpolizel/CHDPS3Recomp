@@ -92,7 +92,7 @@ def say(msg):
 
 def load_state():
     try:
-        return json.load(open(STATE))
+        return json.load(open(STATE, encoding="utf-8-sig"))   # a BOM from an editor is fine
     except (OSError, ValueError):
         return {"done": []}
 

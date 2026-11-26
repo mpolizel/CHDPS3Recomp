@@ -31,7 +31,11 @@ If you enjoy this project, you can support it here: [Buy me a coffee](https://bu
 
 ## Install
 
-Install through [RecompLauncher](https://recomplauncher.com): pick the package and, for the full game, the `.rap`. It runs the installer with no console window ([recomplauncher.json](recomplauncher.json)).
+Open **`CHDLauncher.exe`**. Under **Installation**, choose your game package, then **Install**. For the full game, add your `.rap` under **Licences**. When it's done, **Game → Play** starts it.
+
+The launcher's menu is inspired by the PS3's, with its own art. It runs with keyboard, controller (XInput) or mouse, shows the installation's progress, and comes back when the game closes. The source is [launcher/launcher.cpp](launcher/launcher.cpp). `build_launcher.bat` builds it with the portable toolchain; the release ships it built, since it holds no game code.
+
+You can also install through [RecompLauncher](https://recomplauncher.com): pick the package and, for the full game, the `.rap`. It runs the installer with no console window ([recomplauncher.json](recomplauncher.json)).
 
 From a copy of this repository, run:
 
