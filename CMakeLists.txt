@@ -200,6 +200,7 @@ add_executable(${PROJECT_NAME}
     src/port_licence.c
     src/port_settings.c
     src/port_achievements.c
+    src/port_save.c
     ${PRX_DIR}/prx_table.c
     ${PS3RECOMP_SCAFFOLD}
     ${HLE_NID_TABLE}

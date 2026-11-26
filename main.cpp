@@ -172,6 +172,7 @@ extern "C" int  rsx_null_backend_pump_messages(void);
  * otherwise (src/port_settings.c, read in main before the renderer starts). */
 static unsigned g_window_width = 1280, g_window_height = 720;
 extern "C" void port_settings_early(unsigned* w, unsigned* h);
+extern "C" void port_save_early(void);             /* src/port_save.c */
 
 /* ---------------------------------------------------------------------------
  * Frame clock
@@ -489,6 +490,7 @@ int main(int argc, char** argv)
     port_windowless_setup(&argc, &argv);
 #endif
     port_settings_early(&g_window_width, &g_window_height);
+    port_save_early();
     if (argc < 2) {
         printf("usage: %s <PPU ELF>\n", argv[0]);
         return 2;

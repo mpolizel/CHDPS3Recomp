@@ -1,3 +1,136 @@
+diff --git a/libs/audio/cellAudio.c b/libs/audio/cellAudio.c
+index a21adb80..52184be6 100644
+--- a/libs/audio/cellAudio.c
++++ b/libs/audio/cellAudio.c
+@@ -597,6 +597,80 @@ static void audio_dump_mix(void)
+ 
+ #ifdef _WIN32
+ static unsigned long long g_audio_underruns;
++
++#if AUDIO_BACKEND_WASAPI
++/* Submit s_mix_buffer resampled by (1 + c), c steering the device queue to a
++ * target fill (see the pacing note in audio_mix_thread_func). room = frames
++ * free in the device buffer, read just before this block was mixed. */
++static void audio_submit_drift(int room)
++{
++    enum { N = CELL_AUDIO_BLOCK_SAMPLES, OUT_MAX = N * 2 };
++    static float  hist[2];          /* last frame of the previous block (x[-1]) */
++    static double phase = 0.0;      /* read position in this block, x[-1] .. x[N-1] */
++    static double fill = -1.0;      /* smoothed device queue, frames */
++    static float  out[OUT_MAX * 2];
++    static float  zeros[4096 * 2];
++
++    const UINT32 buf = s_wasapi_buf_frames;
++    if (buf < 4 * N) { audio_backend_submit(s_mix_buffer, N); return; }
++    const double target = buf * 2.0 / 3.0;   /* 40 ms of a 60 ms buffer */
++    const int queued = (int)buf - room;
++
++    /* Start, or the device ran dry (a stall): a gap is happening anyway, so
++     * fill straight to the target with silence instead of crawling back. */
++    if (fill < 0.0 || queued < N / 2) {
++        if (fill >= 0.0) g_audio_underruns++;
++        int pad = (int)target - queued;
++        if (pad > 4096) pad = 4096;
++        if (pad > 0) audio_backend_submit(zeros, (u32)pad);
++        fill = target;
++    } else {
++        fill += (queued - fill) * 0.02;      /* ~0.27 s smoothing: devices pull in 10 ms chunks */
++    }
++
++    /* Proportional with a dead band: within 240 frames of the target the
++     * samples go out untouched (on the test machine the device and the
++     * counter agreed to ~10 ppm, so that is the usual case); past it, 1000
++     * frames off -> 0.2 %, clamped at 0.3 %, a ~10 s time constant. A device
++     * 230 ppm off settles ~355 frames from the target. */
++    const double band = 240.0, e = target - fill;
++    double c = e > band ? (e - band) * 2e-6 : e < -band ? (e + band) * 2e-6 : 0.0;
++    if (c > 0.003) c = 0.003;
++    if (c < -0.003) c = -0.003;
++    double step = 1.0 / (1.0 + c);
++    /* Untouched means whole-sample positions: glide a fractional phase left
++     * by an earlier correction back to one (at most 20 ppm, inaudible), so a
++     * steady interpolation does not soften the treble. */
++    if (c == 0.0) {
++        const double frac = phase - floor(phase);
++        if (frac > 1e-9) step += frac < 0.5 ? -fmin(frac, 2e-5 * N) / N : fmin(1.0 - frac, 2e-5 * N) / N;
++    }
++
++    const float* x = s_mix_buffer;
++    int n = 0;
++    while (phase < (double)(N - 1) && n < OUT_MAX) {
++        const int i = (int)floor(phase);      /* -1 .. N-2 */
++        const float f = (float)(phase - i);
++        float l0, r0;
++        if (i < 0) { l0 = hist[0]; r0 = hist[1]; }
++        else       { l0 = x[i * 2]; r0 = x[i * 2 + 1]; }
++        const float l1 = x[(i + 1) * 2], r1 = x[(i + 1) * 2 + 1];
++        out[n * 2]     = l0 + (l1 - l0) * f;
++        out[n * 2 + 1] = r0 + (r1 - r0) * f;
++        n++;
++        phase += step;
++    }
++    phase -= N;
++    hist[0] = x[(N - 1) * 2]; hist[1] = x[(N - 1) * 2 + 1];
++    audio_backend_submit(out, (u32)n);
++
++    { static int on = -1; if (on < 0) on = getenv("AUDIO_RATE") ? 1 : 0;
++      if (on) { static unsigned k; if (++k % 938 == 0)
++          fprintf(stderr, "[audio-drift] queue %d (avg %.0f, target %.0f), rate %+.0f ppm%c",
++                  queued, fill, target, c * 1e6, 10); } }
++}
++#endif
++
+ static unsigned __stdcall audio_mix_thread_func(void* arg)
+ {
+     (void)arg;
+@@ -621,18 +695,32 @@ static unsigned __stdcall audio_mix_thread_func(void* arg)
+      * dropped the surplus: 20% of the audio thrown away, and a guest mixer
+      * (GH3's FMOD) that could not keep ahead of the read index played gaps.
+      * With no device, pace on the performance counter instead. */
++    /*
++     * CHD port (2026-11-26): pace the guest on the performance counter, not on
++     * the device. The guest's own clocks (timebase, sys_time) run on the
++     * performance counter; the device's crystal does not, and on the test
++     * machine it ran ~230 ppm fast. Paced by the device, the read index gained
++     * a block on the guest every ~23 s, and HoD's Multistream logged "lagging
++     * by 1 packets to libAudio" and skipped a packet: a small click each time.
++     * Now the read index and the period events follow the guest's clock
++     * exactly, and the device's drift is absorbed on the host side: each block
++     * goes out stretched or squeezed by a few hundred ppm (linear interpolation,
++     * far below hearing) so the device queue holds near a fixed level.
++     * PS3_AUDIO_DEVICE_PACE=1 restores the old device pacing.
++     */
+     LARGE_INTEGER qf, q0; QueryPerformanceFrequency(&qf); QueryPerformanceCounter(&q0);
+     unsigned long long blocks = 0;
++    const int device_pace = getenv("PS3_AUDIO_DEVICE_PACE") ? 1 : 0;
+     while (s_mix_thread_running) {
+-        const int room = audio_backend_room();
+-        if (room >= 0 && room < CELL_AUDIO_BLOCK_SAMPLES) { audio_backend_wait(); continue; }
++        int room = audio_backend_room();
++        if (device_pace && room >= 0 && room < CELL_AUDIO_BLOCK_SAMPLES) { audio_backend_wait(); continue; }
+ #if AUDIO_BACKEND_WASAPI
+         /* Device queue under half a block: it is about to play silence (an
+          * audible click/stutter). AUDIO_RATE reports how often. */
+-        if (room >= 0 && blocks > 64 &&
++        if (device_pace && room >= 0 && blocks > 64 &&
+             (UINT32)room + CELL_AUDIO_BLOCK_SAMPLES / 2 >= s_wasapi_buf_frames) g_audio_underruns++;
+ #endif
+-        if (room < 0) {
++        if (room < 0 || !device_pace) {
+             LARGE_INTEGER now; QueryPerformanceCounter(&now);
+             const long long due = q0.QuadPart +
+                 (long long)(blocks * CELL_AUDIO_BLOCK_SAMPLES * qf.QuadPart / CELL_AUDIO_SAMPLE_RATE);
+@@ -653,6 +741,10 @@ static unsigned __stdcall audio_mix_thread_func(void* arg)
+             if ((++_n % 200) == 0 || (pk > 0.001f && _n < 40))
+                 fprintf(stderr, "[audio-peak] block#%u peak=%.4f\n", _n, pk); } }
+         audio_dump_mix();
++#if AUDIO_BACKEND_WASAPI
++        if (!device_pace && room >= 0) audio_submit_drift(room);
++        else
++#endif
+         audio_backend_submit(s_mix_buffer, CELL_AUDIO_BLOCK_SAMPLES);
+         /* AUDIO_RATE=1: blocks mixed vs real time, and frames dropped. */
+         { static int on = -1; if (on < 0) on = getenv("AUDIO_RATE") ? 1 : 0;
 diff --git a/libs/input/cellPad.c b/libs/input/cellPad.c
 index ab241cfa..d43088f7 100644
 --- a/libs/input/cellPad.c

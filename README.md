@@ -74,18 +74,20 @@ In the launcher, choose **System > Check for updates**. It asks GitHub for the l
 1. It downloads the release.
 2. It copies your saves to `save-backups\<date>_before_<version>\`. Those copies are never deleted.
 3. It lays the new files over the install.
-4. It runs the installer once, which rebuilds only what changed (a few minutes).
+4. It runs the installer once. The installer deletes the package files that the new version no longer has, then rebuilds only what changed (a few minutes).
 5. It reopens the launcher.
 
+The installer only deletes files in the folders that come from the package (`src\`, `tools\`, `cmake\`, `ext\`, `python\`), and only ones missing from the package's own list, `release_files.txt`.
+
 These are never written:
-- `gamedata\`: your saves and trophies;
+- `gamedata\`: your saves and trophies. The save is `gamedata\dev_hdd0\home\00000001\savedata\NPUB30505__CASTLEVANIA-HOD-SAVE`, the same name a PS3 gives it. Versions up to 0.0.5 named it `BLES00000__…`, and the game renames that folder when it starts;
 - `licenses\`, `dlc\`;
 - `game\`: the extracted and translated game;
 - `build-mingw\`: the built game, which is only rebuilt;
 - `cache\`, `out\`;
 - `config.ini`, `launcher.ini`.
 
-Nothing is deleted. If the saves changed during the copy anyway, the backup is put back. Checked on an install with saves, settings, the full licence and a DLC, updated from 0.0.2 to 0.0.3: every one of those files came through byte-identical, and the game loaded its save.
+None of your files are deleted. If the saves changed during the copy anyway, the backup is put back. Checked on an install with saves, settings, the full licence and a DLC, updated from 0.0.2 to 0.0.3: every one of those files came through byte-identical, and the game loaded its save.
 
 Unzipping a new release over the folder by hand and choosing **Installation > Verify installation** does the same.
 

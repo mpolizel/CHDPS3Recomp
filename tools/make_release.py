@@ -135,6 +135,13 @@ def main():
     shutil.copytree(os.path.join(ROOT, "python"), os.path.join(stage, "python"),
                     ignore=shutil.ignore_patterns("__pycache__"))
 
+    # The package's own file list: the installer deletes what an older version
+    # left in the package's folders and this one no longer has.
+    listed = sorted(os.path.relpath(os.path.join(dp, f), stage).replace(os.sep, "/")
+                    for dp, _, fs in os.walk(stage) for f in fs)
+    with open(os.path.join(stage, "release_files.txt"), "w", encoding="utf-8", newline="\n") as f:
+        f.write("\n".join(sorted(listed + ["release_files.txt"])) + "\n")
+
     problems = audit(stage)
     if problems:
         print("\n".join(problems))

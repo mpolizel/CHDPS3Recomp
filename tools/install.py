@@ -295,6 +295,49 @@ def _source_files():
                         yield os.path.relpath(p, ROOT).replace(os.sep, "/"), p
 
 
+# Folders that belong to the release package: an update may remove or rename
+# files there, and the build collects some of them by folder, so a file the new
+# version no longer has must not stay behind. Nothing the player or the
+# installer makes lives in them (only Python's __pycache__, left alone).
+PACKAGE_MANIFEST = os.path.join(ROOT, "release_files.txt")
+PACKAGE_ROOTS = ["src", "tools", "cmake", "ext/ps3recomp", "ext/rl-achievements", "python"]
+
+
+def prune_stale_files():
+    """Delete the files in PACKAGE_ROOTS that the installed package does not
+    list in release_files.txt (left there by an older version). Without the
+    list (a git checkout) nothing is touched."""
+    try:
+        with open(PACKAGE_MANIFEST, encoding="utf-8") as f:
+            listed = {l.strip().replace("\\", "/").lower() for l in f if l.strip()}
+    except OSError:
+        return 0
+    if not any(n.startswith("tools/") for n in listed):   # not a full list: do nothing
+        return 0
+    removed = 0
+    for r in PACKAGE_ROOTS:
+        top = os.path.join(ROOT, r)
+        for dp, ds, fs in os.walk(top, topdown=False):
+            if "__pycache__" in os.path.relpath(dp, ROOT).replace(os.sep, "/").split("/"):
+                continue
+            for f in fs:
+                p = os.path.join(dp, f)
+                rel = os.path.relpath(p, ROOT).replace(os.sep, "/")
+                if rel.lower() not in listed:
+                    try:
+                        os.remove(p)
+                        removed += 1
+                        say(f"removed {rel} (not in this version)")
+                    except OSError as e:
+                        say(f"could not remove {rel}: {e}")
+            if dp != top and not os.listdir(dp):
+                try:
+                    os.rmdir(dp)
+                except OSError:
+                    pass
+    return removed
+
+
 def mark_changed_sources():
     """Touch every build input whose content differs from the last build's, so
     an update's files are rebuilt whatever their dates. With no record of the
@@ -603,6 +646,9 @@ def main():
         # with version.txt must not let changed files go unbuilt. Hashing the
         # inputs takes well under a second.
         version = open(os.path.join(ROOT, "version.txt")).read().strip()
+        n = prune_stale_files()
+        if n:
+            say(f"version {version}: {n} files of an older version removed")
         if "build" in st.get("done", []) or os.path.exists(SOURCE_HASHES):
             n = mark_changed_sources()
             if n:
