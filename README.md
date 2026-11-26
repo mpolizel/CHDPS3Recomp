@@ -62,7 +62,7 @@ A full install takes about 20 minutes. `build.bat` (Visual Studio clang-cl, into
 
 No keys are in the repository. `ps3crypt.py` reads them from RPCS3's public `key_vault.cpp`/`.h`, downloaded at install time. The game's own klicensee is read from the player's EBOOT.
 
-The `.rap` is copied to `licenses/`. Running as the trial without it is planned but not done yet: today the game always runs as the full version.
+The `.rap` is copied to `licenses/`. Without it the game runs as the trial, as on a PS3 without the purchase: Alucard only, single player. A small **Trial Mode** label stays in the corner of the window. Adding the `.rap` later (launcher: **Licences > Add licence**) unlocks the full game the next time it starts, with no reinstall.
 
 The manual steps below are what the installer automates.
 
@@ -199,7 +199,7 @@ Keyboard: Enter = Start, Tab = Select, arrows = D-pad/left stick, Z = Cross (con
 - Boots, title screen renders correctly with text, no flicker, 60+ FPS, keyboard input works, save data loads.
 - Main menu, Local Play lobby and the PSN notice render fully.
 - **Chapter 1 loads and plays** with Soma: HUD, timer and enemies run, keyboard controls the character.
-- The license check (`sceNpDrmVerifyUpgradeLicense`) is faked as OK, so the game runs as the full version.
+- The full-version check (`sceNpDrmVerifyUpgradeLicense`) answers as the console does: the licence is there when `licenses/UP0101-NPUB30505_00-CVHDZDLCZUNLOCKZ.rap` is ([src/port_licence.c](src/port_licence.c)). Before, ps3recomp had no handler and an unresolved import answers OK, so every copy ran as the full game.
 - Audio works when the PS3 firmware is installed (see step 5): sound effects and voices (PS-ADPCM, decoded by Multistream itself) and the music (ATRAC3, decoded by the firmware). Without the firmware there is no sound.
 - ps3recomp's `lift_prx.py` gained the REL24/REL14/ADDR64/ADDR16_LO_DS relocations (and a corrected REL64) the game's modules use.
 

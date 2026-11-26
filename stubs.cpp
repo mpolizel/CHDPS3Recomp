@@ -30,6 +30,7 @@
 extern "C" void port_resc_register(void);   /* src/port_resc.c */
 extern "C" void port_prx_register(void);    /* src/port_prx.c */
 extern "C" void port_debug_start(void);     /* src/port_debug.c */
+extern "C" void port_licence_register(void); /* src/port_licence.c */
 extern "C" void rsx_d3d12_alias_texture_to_rt(uint32_t tex_off, uint32_t rt_off);
 
 #ifdef _WIN32
@@ -100,6 +101,7 @@ extern "C" void ps3_load_prx_modules(void)
     port_resc_register();
     port_prx_register();
     port_debug_start();
+    port_licence_register();
 
     /* The menus render their UI layer into the RT at 0x02AF9800, then the
      * game's own code copies it into one of two buffers and the final pass
