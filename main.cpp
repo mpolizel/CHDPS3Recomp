@@ -168,8 +168,10 @@ extern "C" int  rsx_null_backend_pump_messages(void);
 #define VM_SIZE       0x100010000ull   /* the full 32-bit guest space + a 64K guard */
 #define STACK_TOP     0x0FF00000u      /* main-thread stack, below the 0x10000000 segment */
 #define STACK_SIZE    0x00100000u      /* what the main thread is told it has */
-#define WINDOW_WIDTH  1280
-#define WINDOW_HEIGHT 720
+/* The presented image size: 1280x720 unless the player's config.ini says
+ * otherwise (src/port_settings.c, read in main before the renderer starts). */
+static unsigned g_window_width = 1280, g_window_height = 720;
+extern "C" void port_settings_early(unsigned* w, unsigned* h);
 
 /* ---------------------------------------------------------------------------
  * Frame clock
@@ -207,7 +209,7 @@ static DWORD WINAPI frame_clock(LPVOID)
     const char* title = getenv("PS3_TITLE");
     if (!title || !*title) title = "ps3recomp";
 
-    int rsx_ok = (rsx_backend_init(WINDOW_WIDTH, WINDOW_HEIGHT, title) == 0);
+    int rsx_ok = (rsx_backend_init(g_window_width, g_window_height, title) == 0);
     fprintf(stderr, "[rsx] %s backend init %s\n", RSX_BACKEND_NAME,
             rsx_ok ? "OK -- window open" : "FAILED");
 
@@ -483,6 +485,7 @@ int main(int argc, char** argv)
 #ifdef _WIN32
     port_windowless_setup(&argc, &argv);
 #endif
+    port_settings_early(&g_window_width, &g_window_height);
     if (argc < 2) {
         printf("usage: %s <PPU ELF>\n", argv[0]);
         return 2;

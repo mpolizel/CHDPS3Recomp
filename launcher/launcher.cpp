@@ -319,7 +319,7 @@ struct Category {
     float pos = 0;     // animated selection
 };
 
-enum class Mode { Menu, Installing, Message, Confirm };
+enum class Mode { Menu, Installing, Message, Confirm, Choice };
 static Mode g_mode = Mode::Menu;
 static std::vector<Category> g_cats;
 static int g_cat = 0;
@@ -327,6 +327,80 @@ static float g_cat_pos = 0;
 static std::wstring g_msg_title, g_msg_text;
 static std::function<void()> g_confirm_yes;
 static bool g_hidden_for_game = false;
+static bool g_overlay = false;            // opened over the running game (F1 in the game)
+static bool g_started_for_settings = false;   // started by the game with --settings
+#define WM_APP_SHOW_SETTINGS (WM_APP + 2)    // the game's F1 (src/port_settings.c)
+
+// ------------------------------------------------------------- settings
+
+// config.ini in the install folder; src/port_settings.c applies it to the game.
+struct Setting {
+    const wchar_t* section;
+    const wchar_t* key;
+    const wchar_t* label;
+    wchar_t icon;
+    const wchar_t* help;
+    std::vector<std::pair<std::wstring, std::wstring>> values;   // stored value, shown label
+    const wchar_t* def;
+    bool next_start;          // applies the next time the game starts
+};
+static std::vector<Setting> g_settings;
+static int g_choice_setting = 0, g_choice_sel = 0;
+
+static std::wstring cfg_get(const Setting& s)
+{
+    wchar_t buf[128] = {};
+    GetPrivateProfileStringW(s.section, s.key, s.def, buf, 128, (g_root + L"\\config.ini").c_str());
+    return buf;
+}
+
+static void cfg_set(const Setting& s, const std::wstring& v)
+{
+    WritePrivateProfileStringW(s.section, s.key, v.c_str(), (g_root + L"\\config.ini").c_str());
+}
+
+static int setting_index(const Setting& s)
+{
+    std::wstring v = cfg_get(s);
+    for (size_t i = 0; i < s.values.size(); ++i)
+        if (_wcsicmp(s.values[i].first.c_str(), v.c_str()) == 0) return (int)i;
+    for (size_t i = 0; i < s.values.size(); ++i)
+        if (s.values[i].first == s.def) return (int)i;
+    return 0;
+}
+
+static HWND game_window() { return FindWindowW(L"ps3recomp_d3d12", nullptr); }
+
+static void init_settings()
+{
+    std::vector<std::pair<std::wstring, std::wstring>> volume;
+    for (int v = 100; v >= 0; v -= 10) volume.push_back({std::to_wstring(v), std::to_wstring(v) + L"%"});
+    g_settings = {
+        {L"Display", L"Mode", L"Screen", 0xE7F4, L"F11 or Alt+Enter also switches it in the game.",
+         {{L"windowed", L"Windowed"}, {L"fullscreen", L"Fullscreen"}}, L"windowed", false},
+        {L"Display", L"Aspect", L"Fullscreen picture", 0xE740, L"For screens that aren't 16:9, like ultrawide or 16:10.",
+         {{L"keep", L"Keep the game's shape"}, {L"stretch", L"Stretch to fill the screen"}}, L"keep", false},
+        {L"Display", L"WindowSize", L"Window size", 0xE7C4, L"The size of the game's window when it isn't fullscreen.",
+         {{L"1280x720", L"1280 x 720"}, {L"1600x900", L"1600 x 900"}, {L"1920x1080", L"1920 x 1080"}, {L"2560x1440", L"2560 x 1440"}},
+         L"1280x720", false},
+        {L"Audio", L"Volume", L"Volume", 0xE767, L"The game's volume (Windows' mixer shows the same).", volume, L"100", false},
+        {L"Display", L"VSync", L"VSync", 0xE9F5, L"Off can raise the frame rate, with tearing. Applies the next time the game starts.",
+         {{L"1", L"On"}, {L"0", L"Off"}}, L"1", true},
+        {L"Interface", L"ShowFps", L"Show FPS", 0xEC4A, L"The frame rate, in the window's title.",
+         {{L"0", L"Off"}, {L"1", L"On"}}, L"0", false},
+        {L"Interface", L"EscQuits", L"Esc closes the game", 0xE711, L"Off keeps a stray Esc from closing the game.",
+         {{L"0", L"No"}, {L"1", L"Yes"}}, L"0", false},
+    };
+}
+
+static void open_choice(int si)
+{
+    g_choice_setting = si;
+    g_choice_sel = setting_index(g_settings[si]);
+    g_mode = Mode::Choice;
+}
+
+static void back_to_game();
 
 static void message(const std::wstring& title, const std::wstring& text)
 {
@@ -442,7 +516,30 @@ static void build_menu()
             return std::wstring(L"Finishes or repairs an interrupted installation");
         }, do_install},
     }});
-    g_cats.push_back({L"System", 0xE713, {
+    {
+        Category set{L"Settings", 0xE713, {}};
+        if (g_overlay)
+            set.items.push_back({L"Back to game", 0xE768, [] {
+                return std::wstring(L"Close the settings and return to the game (Esc / B)");
+            }, back_to_game});
+        for (size_t i = 0; i < g_settings.size(); ++i) {
+            set.items.push_back({g_settings[i].label, g_settings[i].icon, [i] {
+                const Setting& s = g_settings[i];
+                return s.values[setting_index(s)].second + L"   ·   " + s.help;
+            }, [i] { open_choice((int)i); }});
+        }
+        set.items.push_back({L"Controls", 0xE765, [] {
+            return std::wstring(L"Keyboard and controller buttons");
+        }, [] {
+            message(L"Controls",
+                    L"Keyboard: arrows move, Z = Cross, X = Circle, A = Square, S = Triangle, Q/W = L1/R1, "
+                    L"1/2 = L2/R2, Enter = Start, Tab = Select, 4 = camera zoom.\n"
+                    L"An Xbox controller works as the PS3 pad.\n"
+                    L"In the game: F1 settings, F11 or Alt+Enter fullscreen.");
+        }});
+        g_cats.insert(g_cats.begin() + 1, set);
+    }
+    g_cats.push_back({L"System", 0xE770, {
         {L"Game folder", 0xE838, [] { return g_root; }, [] { open_path(g_root); }},
         {L"Logs", 0xE8A5, [] { return std::wstring(L"The game's and the installer's logs"); },
          [] { CreateDirectoryW((g_root + L"\\out").c_str(), nullptr); open_path(g_root + L"\\out"); }},
@@ -720,6 +817,33 @@ static void draw_dialog(bool with_choice)
     text(with_choice ? L"Enter / A  Yes        Esc / B  No" : L"Enter / A  OK", f_small, x + 40, y + h - 46, w - 80, 24);
 }
 
+static void draw_choice()
+{
+    const Setting& s = g_settings[g_choice_setting];
+    float n = (float)s.values.size();
+    float row = 40, x = 760, w = 440, h = 96 + n * row;
+    float y = std::max(60.0f, 360 - h / 2);
+    color(0, 0, 0, 0.35f);
+    g_rt->FillRectangle(D2D1::RectF(-2000, -2000, 4000, 4000), g_brush);
+    panel(x, y, w, h);
+    color(1, 1, 1);
+    text(s.label, f_cat, x, y + 22, w, 28);       // f_cat is centred
+    int current = setting_index(s);
+    for (size_t i = 0; i < s.values.size(); ++i) {
+        float ry = y + 66 + i * row;
+        if ((int)i == g_choice_sel) {
+            color(1, 1, 1, 0.12f);
+            g_rt->FillRoundedRectangle(D2D1::RoundedRect(D2D1::RectF(x + 16, ry - 4, x + w - 16, ry + row - 6), 8, 8), g_brush);
+        }
+        color(1, 1, 1, (int)i == g_choice_sel ? 1.0f : 0.7f);
+        text(s.values[i].second, f_body, x + 56, ry + 4, w - 80, 28);
+        if ((int)i == current) {
+            color(1.0f, 0.80f, 0.86f, 0.95f);
+            text(std::wstring(1, (wchar_t)0xE73E), f_icon_item, x + 14, ry - 6, 44, 44);
+        }
+    }
+}
+
 static void render()
 {
     create_target();
@@ -747,6 +871,7 @@ static void render()
         draw_menu(t);
         if (g_mode == Mode::Message) draw_dialog(false);
         if (g_mode == Mode::Confirm) draw_dialog(true);
+        if (g_mode == Mode::Choice) draw_choice();
     }
     if (g_rt->EndDraw() == D2DERR_RECREATE_TARGET) release_target();
 }
@@ -763,6 +888,20 @@ static void on_key(Key k)
         else if (k == K_BACK) g_mode = Mode::Menu;
         return;
     }
+    if (g_mode == Mode::Choice) {
+        const Setting& s = g_settings[g_choice_setting];
+        if (k == K_UP && g_choice_sel > 0) g_choice_sel--;
+        else if (k == K_DOWN && g_choice_sel + 1 < (int)s.values.size()) g_choice_sel++;
+        else if (k == K_BACK || k == K_LEFT) g_mode = Mode::Menu;
+        else if (k == K_OK) {
+            bool changed = g_choice_sel != setting_index(s);
+            cfg_set(s, s.values[g_choice_sel].first);     // the game picks it up within a second
+            g_mode = Mode::Menu;
+            if (changed && s.next_start && game_window())
+                message(L"Saved", L"This one applies the next time the game starts.");
+        }
+        return;
+    }
     if (g_mode == Mode::Installing) {
         if (k == K_BACK) confirm(L"Stop installing?", L"The installation stops now. Next time it resumes from the step it was on.",
                                  [] { cancel_install(); });
@@ -775,8 +914,47 @@ static void on_key(Key k)
     case K_UP:    if (c.sel > 0) c.sel--; break;
     case K_DOWN:  if (c.sel + 1 < (int)c.items.size()) c.sel++; break;
     case K_OK:    c.items[c.sel].act(); break;
-    case K_BACK:  if (c.sel > 0) c.sel = 0; break;
+    case K_BACK:
+        if (c.sel > 0) c.sel = 0;
+        else if (g_overlay) back_to_game();
+        break;
     }
+}
+
+// F1 in the game: the settings over it. The launcher may be hidden behind a
+// running game (started from Play), or not running at all (then the game
+// starts it with --settings, and it closes again on the way back).
+static void show_settings_overlay()
+{
+    g_overlay = true;
+    build_menu();
+    goto_category(L"Settings");
+    g_cats[g_cat].sel = 0;
+    g_cat_pos = (float)g_cat;
+    g_mode = Mode::Menu;
+    ShowWindow(g_hwnd, SW_SHOWNORMAL);
+    RECT gr, lr;
+    HWND game = game_window();
+    if (game && GetWindowRect(game, &gr) && GetWindowRect(g_hwnd, &lr)) {   // centred on the game
+        int lw = lr.right - lr.left, lh = lr.bottom - lr.top;
+        SetWindowPos(g_hwnd, HWND_TOPMOST, (gr.left + gr.right - lw) / 2, std::max((int)gr.top, (int)(gr.top + gr.bottom - lh) / 2),
+                     0, 0, SWP_NOSIZE);
+    } else {
+        SetWindowPos(g_hwnd, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE);   // above a fullscreen game
+    }
+    SetForegroundWindow(g_hwnd);
+}
+
+static void back_to_game()
+{
+    g_overlay = false;
+    SetWindowPos(g_hwnd, HWND_NOTOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE);
+    HWND game = game_window();
+    if (g_started_for_settings) { PostMessageW(g_hwnd, WM_CLOSE, 0, 0); }
+    else if (game) ShowWindow(g_hwnd, g_hidden_for_game ? SW_HIDE : SW_MINIMIZE);
+    if (game) SetForegroundWindow(game);
+    build_menu();
+    goto_category(L"Settings");
 }
 
 static void poll_install()
@@ -880,7 +1058,12 @@ static LRESULT CALLBACK wndproc(HWND h, UINT m, WPARAM wp, LPARAM lp)
         }
         return 0;
     }
+    case WM_APP_SHOW_SETTINGS:
+        show_settings_overlay();
+        return 0;
     case WM_APP_GAME_EXITED:
+        if (g_overlay) { g_overlay = false; build_menu(); }
+        SetWindowPos(h, HWND_NOTOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE);
         g_hidden_for_game = false;
         ShowWindow(h, SW_SHOW);
         SetForegroundWindow(h);
@@ -900,17 +1083,20 @@ static LRESULT CALLBACK wndproc(HWND h, UINT m, WPARAM wp, LPARAM lp)
     return DefWindowProcW(h, m, wp, lp);
 }
 
-int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int show)
+int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR cmdline, int show)
 {
     SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
     CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
+    bool want_settings = cmdline && wcsstr(cmdline, L"--settings");
     HANDLE single = CreateMutexW(nullptr, TRUE, L"CHDPS3RecompLauncher");
     if (GetLastError() == ERROR_ALREADY_EXISTS) {
         HWND other = FindWindowW(L"CHDLauncher", nullptr);
-        if (other) { ShowWindow(other, SW_SHOW); SetForegroundWindow(other); }
+        if (other && want_settings) PostMessageW(other, WM_APP_SHOW_SETTINGS, 0, 0);
+        else if (other) { ShowWindow(other, SW_SHOW); SetForegroundWindow(other); }
         return 0;
     }
     find_root();
+    init_settings();
     if (HMODULE x = LoadLibraryW(L"xinput1_4.dll")) g_xget = (XInputGetStateFn)GetProcAddress(x, "XInputGetState");
 
     D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED, &g_d2d);
@@ -936,7 +1122,12 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int show)
                              r.right - r.left, r.bottom - r.top, nullptr, nullptr, inst, nullptr);
     BOOL dark = TRUE;
     DwmSetWindowAttribute(g_hwnd, 20 /* DWMWA_USE_IMMERSIVE_DARK_MODE */, &dark, sizeof dark);
-    ShowWindow(g_hwnd, show);
+    if (want_settings) {
+        g_started_for_settings = true;
+        show_settings_overlay();
+    } else {
+        ShowWindow(g_hwnd, show);
+    }
     g_t0 = GetTickCount();
 
     MSG msg;
@@ -947,7 +1138,7 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int show)
             DispatchMessageW(&msg);
         }
         poll_install();
-        if (g_hidden_for_game || IsIconic(g_hwnd)) { Sleep(50); continue; }
+        if (!IsWindowVisible(g_hwnd) || IsIconic(g_hwnd)) { Sleep(50); continue; }
         poll_pad();
         render();        // EndDraw waits for the display's refresh
     }

@@ -1,5 +1,5 @@
 diff --git a/libs/input/cellPad.c b/libs/input/cellPad.c
-index ab241cfa..aab51800 100644
+index ab241cfa..d43088f7 100644
 --- a/libs/input/cellPad.c
 +++ b/libs/input/cellPad.c
 @@ -235,6 +235,8 @@ static int pad_key_down(int key) { return (GetAsyncKeyState(key) & 0x8000) != 0;
@@ -51,6 +51,26 @@ index ab241cfa..aab51800 100644
      hs->trigger_l2 = (u8)((btns & CELL_PAD_CTRL_L2) ? 255 : 0);
      hs->trigger_r2 = (u8)((btns & CELL_PAD_CTRL_R2) ? 255 : 0);
  
+@@ -439,6 +452,19 @@ static void pad_poll_xinput(void)
+         s_pad_empty_until[i] = 0;
+ 
+         s_host_state[i].connected = 1;
++        /* PAD_FOCUS_ONLY=1: the controller, like the keyboard, only reaches
++         * the game while one of its windows is in front. A port whose own
++         * settings window opens over the game (another process) sets it, or
++         * every press made in that window also lands in the game. */
++        {
++            static int focus_only = -1;
++            if (focus_only < 0) { const char* e = getenv("PAD_FOCUS_ONLY"); focus_only = e && *e == '1'; }
++            if (focus_only && !pad_host_window_focused()) {
++                pad_host_release(&s_host_state[i]);
++                s_host_state[i].connected = 1;
++                continue;
++            }
++        }
+         XINPUT_GAMEPAD* gp = &state.Gamepad;
+ 
+         /* Map XInput buttons to PS3 CELL_PAD_CTRL_* */
 diff --git a/libs/video/cellGcmSys.c b/libs/video/cellGcmSys.c
 index 4929d89c..af846a98 100644
 --- a/libs/video/cellGcmSys.c

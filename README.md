@@ -45,6 +45,24 @@ install.bat <UP0101-NPUB30505_00-CASTHARMONYOFDES.pkg> [UP0101-NPUB30505_00-CVHD
 
 Once it's done, open `build-mingw\CHDPS3Recomp.exe` to play. It needs no arguments and opens no console; its log goes to `out\run.log`.
 
+## Settings
+
+Open them in the launcher under **Settings**, or press **F1** in the game to open them over it, with **Back to game** at the top. They are saved in `config.ini` in the game's folder.
+
+| Setting | Choices | Takes effect |
+|---|---|---|
+| Screen | Windowed, Fullscreen (borderless) | right away; **F11** or **Alt+Enter** in the game too |
+| Fullscreen picture | Keep the game's shape (black bars on ultrawide or 16:10), Stretch | right away |
+| Window size | 1280x720, 1600x900, 1920x1080, 2560x1440 | right away |
+| Volume | 0 to 100% | right away (the game's session in Windows' mixer) |
+| VSync | On, Off | next start |
+| Show FPS | Off, On (in the title) | right away |
+| Esc closes the game | No, Yes | right away |
+
+While the settings are open over the game, the controller doesn't reach the game.
+
+The image the game is presented at stays 1280x720. A `Resolution=1920x1080` line is read, but at that size the title screen draws only its text, so it isn't offered yet.
+
 The installer ([tools/install.py](tools/install.py)) does the rest:
 1. Checks the package.
 2. Extracts the package.
@@ -190,6 +208,8 @@ Keyboard: Enter = Start, Tab = Select, arrows = D-pad/left stick, Z = Cross (con
   - diagnostics: `RSX_CAP_ALPHA=1` (capture alpha), `RSX_DBG_VTX=<tex offset>` (dump quad vertices), `TEX_ALIAS_OPAQUE=1`.
   - `SPU_NULL_CALL_RETURN=1`: an SPU call through a null function pointer returns 0 instead of stopping the SPU.
 - [stubs.cpp](stubs.cpp): finds the installed firmware (`PS3_DEV_FLASH`) and turns on `SPU_INTERP_UNLIFTED` for the ATRAC decoder.
+- [src/port_settings.c](src/port_settings.c): applies `config.ini` to the game. It reads the resolution and VSync before the renderer starts, then watches the file. It subclasses the game window for the title, Esc, F11, Alt+Enter and F1. Borderless fullscreen keeps the picture's shape over a black backdrop window, and the volume goes through the process's Windows audio session.
+- `PAD_FOCUS_ONLY=1` (runtime patch): the controller only reaches the game while its window is in front, as the keyboard already did.
 - [src/port_debug.c](src/port_debug.c): `CHD_DEBUG=<file>` starts a debug console that reads commands from that file and writes the answers to `<file>.out`: `mem <ea> [len]`, `dump <ea> <len> <host path>` and `poke8 <ea> <val>` (addresses in hex).
 - [tools/capture_window.ps1](tools/capture_window.ps1), [tools/flicker_probe.ps1](tools/flicker_probe.ps1): screenshot the game window; sample frames to spot flicker.
 - `RSX_CAP=<frame>:1 RSX_CAP_DIR=out\rsxcap`: the backend's frame capture (every draw, texture format and render target of one frame).

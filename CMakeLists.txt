@@ -198,6 +198,7 @@ add_executable(${PROJECT_NAME}
     src/port_prx.c
     src/port_debug.c
     src/port_licence.c
+    src/port_settings.c
     ${PRX_DIR}/prx_table.c
     ${PS3RECOMP_SCAFFOLD}
     ${HLE_NID_TABLE}
@@ -266,7 +267,7 @@ if(WIN32)
     # MinGW ignores the runtime's #pragma comment(lib), so name those here.
     if(MINGW)
         target_link_libraries(${PROJECT_NAME} PRIVATE
-            d3d12 dxgi d3dcompiler bcrypt ws2_32)
+            d3d12 dxgi d3dcompiler bcrypt ws2_32 ole32)
         # libc++ and libunwind go into the exe, which then needs only DLLs
         # that ship with Windows 10/11 (the UCRT included).
         target_link_options(${PROJECT_NAME} PRIVATE -static)
