@@ -544,9 +544,21 @@ def main():
 
     t0 = time.time()
     try:
+        # A new version unzipped over an installed one: its port sources keep
+        # the zip's dates, which can be older than the objects built from the
+        # previous version, so mark them changed; the build step always runs
+        # (with nothing to do it takes seconds) so the game picks them up.
+        version = open(os.path.join(ROOT, "version.txt")).read().strip()
+        if st.get("version") != version:
+            for rel in ["main.cpp", "stubs.cpp", "port_extension.cpp"] +                        [os.path.join("src", f) for f in os.listdir(os.path.join(ROOT, "src"))]:
+                full = os.path.join(ROOT, rel)
+                if os.path.isfile(full):
+                    os.utime(full, None)
+            st["version"] = version
+            save_state(st)
         for n, (sid, title, fn) in enumerate(STEPS, 1):
             say(f"@step {n} {len(STEPS)} {sid} {title}")
-            if sid in st["done"] and sid != "check":
+            if sid in st["done"] and sid not in ("check", "build"):
                 say("already done")
                 continue
             if sid == "check" and not a.pkg:
