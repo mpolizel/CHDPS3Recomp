@@ -41,6 +41,13 @@ static void debug_answer(const char* cmd)
         if (f && vm_base) { fwrite(vm_base + ea, 1, len, f); fclose(f);
                             fprintf(o, "> %s\nwrote %u bytes from 0x%08X to %s\n", cmd, len, ea, host); }
         else fprintf(o, "> %s\ncannot write %s\n", cmd, host);
+    } else if (sscanf(cmd, "trophy %u", &val) == 1) {
+        /* Unlock a trophy through ps3recomp's sceNpTrophyUnlockTrophy, as the
+         * game does, and pass it on like src/port_achievements.c's hook:
+         * tests the achievements path without earning the trophy in play. */
+        extern int port_achievements_test_unlock(unsigned id);
+        int rc = port_achievements_test_unlock(val);
+        fprintf(o, "> %s\nsceNpTrophyUnlockTrophy -> 0x%08X\n", cmd, (unsigned)rc);
     } else if (sscanf(cmd, "mem %x %u", &ea, &len) >= 1) {
         if (len > 0x10000u) len = 0x10000u;
         fprintf(o, "> %s\n", cmd);

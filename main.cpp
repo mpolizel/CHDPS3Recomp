@@ -196,9 +196,12 @@ extern "C" unsigned ppu_boot_frames_presented(void)
     return (unsigned)g_frames_presented;
 }
 
+extern "C" void port_achievements_frame(void);   /* src/port_achievements.c */
+
 static void present_guest_frame(void)
 {
     rsx_backend_present();
+    port_achievements_frame();
     /* This thread increments and guest threads read, so interlocked rather
      * than a volatile ++, which on arm64 is neither atomic nor a fence. */
     InterlockedIncrement(&g_frames_presented);

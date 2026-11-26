@@ -199,6 +199,7 @@ add_executable(${PROJECT_NAME}
     src/port_debug.c
     src/port_licence.c
     src/port_settings.c
+    src/port_achievements.c
     ${PRX_DIR}/prx_table.c
     ${PS3RECOMP_SCAFFOLD}
     ${HLE_NID_TABLE}
@@ -247,6 +248,12 @@ target_include_directories(${PROJECT_NAME} PRIVATE
 target_link_libraries(${PROJECT_NAME} PRIVATE
     ps3recomp_runtime
 )
+
+# Recomp Achievements (RecompLauncher): the game's trophies as achievements.
+# src/port_achievements.c; it does nothing unless RecompLauncher started us.
+add_subdirectory("${CMAKE_CURRENT_SOURCE_DIR}/ext/rl-achievements/sdk"
+                 "${CMAKE_BINARY_DIR}/rl_achievements" EXCLUDE_FROM_ALL)
+target_link_libraries(${PROJECT_NAME} PRIVATE rl_achievements)
 
 # The runtime is C++, and on Apple also Objective-C. Letting CMake infer the
 # link language from the generated C would leave the C++ standard library out.

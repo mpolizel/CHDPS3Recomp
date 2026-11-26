@@ -68,6 +68,45 @@ install.bat <UP0101-NPUB30505_00-CASTHARMONYOFDES.pkg> [UP0101-NPUB30505_00-CVHD
 
 Once it's done, open `build-mingw\CHDPS3Recomp.exe` to play. It needs no arguments and opens no console; its log goes to `out\run.log`.
 
+## Updates
+
+In the launcher, choose **System > Check for updates**. It asks GitHub for the latest release. When that release is newer, and you agree, the update runs in these steps:
+1. It downloads the release.
+2. It copies your saves to `save-backups\<date>_before_<version>\`. Those copies are never deleted.
+3. It lays the new files over the install.
+4. It runs the installer once, which rebuilds only what changed (a few minutes).
+5. It reopens the launcher.
+
+These are never written:
+- `gamedata\`: your saves and trophies;
+- `licenses\`, `dlc\`;
+- `game\`: the extracted and translated game;
+- `build-mingw\`: the built game, which is only rebuilt;
+- `cache\`, `out\`;
+- `config.ini`, `launcher.ini`.
+
+Nothing is deleted. If the saves changed during the copy anyway, the backup is put back. Checked on an install with saves, settings, the full licence and a DLC, updated from 0.0.2 to 0.0.3: every one of those files came through byte-identical, and the game loaded its save.
+
+Unzipping a new release over the folder by hand and choosing **Installation > Verify installation** does the same.
+
+## Achievements
+
+Started from [RecompLauncher](https://recomplauncher.com), the game's own 12 trophies count as [Recomp Achievements](https://github.com/elripalda/RecompAchievements): unlocks, Beaten/Mastered, rarity and leaderboards on your RecompLauncher profile.
+
+[src/port_achievements.c](src/port_achievements.c) does the following:
+- passes each trophy unlock (`sceNpTrophyUnlockTrophy`) on as a native achievement;
+- sends the trophy list from your own `TROPHY.TRP`;
+- sends the trophies you already had, which the launcher keeps as Casual;
+- reports save loads.
+
+Started any other way, it does nothing.
+
+The SDK is the `ext/rl-achievements` submodule, free for games under the Recomp Achievements License.
+
+For development:
+- `tools/fake_rl_launcher.py build-mingw\CHDPS3Recomp.exe` plays the launcher's side of the pipe and prints what the game sends;
+- `trophy <id>` in the `CHD_DEBUG` console unlocks a trophy through the game's own path.
+
 ## Building a release
 
 ```powershell
@@ -249,7 +288,7 @@ Keyboard: Enter = Start, Tab = Select, arrows = D-pad/left stick, Z = Cross (con
 - [stubs.cpp](stubs.cpp): finds the installed firmware (`PS3_DEV_FLASH`) and turns on `SPU_INTERP_UNLIFTED` for the ATRAC decoder.
 - [src/port_settings.c](src/port_settings.c): applies `config.ini` to the game. It reads the resolution and VSync before the renderer starts, then watches the file. It subclasses the game window for the title, Esc, F11, Alt+Enter and F1. Borderless fullscreen keeps the picture's shape over a black backdrop window, and the volume goes through the process's Windows audio session.
 - `PAD_FOCUS_ONLY=1` (runtime patch): the controller only reaches the game while its window is in front, as the keyboard already did.
-- [src/port_debug.c](src/port_debug.c): `CHD_DEBUG=<file>` starts a debug console that reads commands from that file and writes the answers to `<file>.out`: `mem <ea> [len]`, `dump <ea> <len> <host path>` and `poke8 <ea> <val>` (addresses in hex).
+- [src/port_debug.c](src/port_debug.c): `CHD_DEBUG=<file>` starts a debug console that reads commands from that file and writes the answers to `<file>.out`: `mem <ea> [len]`, `dump <ea> <len> <host path>`, `poke8 <ea> <val>` (addresses in hex) and `trophy <id>`.
 - [tools/capture_window.ps1](tools/capture_window.ps1), [tools/flicker_probe.ps1](tools/flicker_probe.ps1): screenshot the game window; sample frames to spot flicker.
 - `RSX_CAP=<frame>:1 RSX_CAP_DIR=out\rsxcap`: the backend's frame capture (every draw, texture format and render target of one frame).
 

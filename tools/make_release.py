@@ -125,6 +125,12 @@ def main():
     with open(os.path.join(stage, "ext", "ps3recomp", ".chd-patched"), "w") as f:
         print("patches/ps3recomp applied", file=f)
 
+    # Recomp Achievements SDK (its licence and the rcheevos/cJSON notices come
+    # with its tracked files, as its licence asks).
+    rla = os.path.join(ROOT, "ext", "rl-achievements")
+    for f in tracked(rla):
+        copy(os.path.join(rla, f), os.path.join(stage, "ext", "rl-achievements", f))
+
     copy(launcher, os.path.join(stage, "CHDLauncher.exe"))
     shutil.copytree(os.path.join(ROOT, "python"), os.path.join(stage, "python"),
                     ignore=shutil.ignore_patterns("__pycache__"))

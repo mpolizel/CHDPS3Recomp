@@ -26,6 +26,7 @@
 #include <shellapi.h>
 #include <shobjidl.h>
 #include <xinput.h>
+#include <winhttp.h>
 
 #include <algorithm>
 #include <atomic>
@@ -331,7 +332,7 @@ struct Category {
     float pos = 0;     // animated selection
 };
 
-enum class Mode { Menu, Installing, Message, Confirm, Choice };
+enum class Mode { Menu, Installing, Message, Confirm, Choice, Updating };
 static Mode g_mode = Mode::Menu;
 static std::vector<Category> g_cats;
 static int g_cat = 0;
@@ -413,6 +414,8 @@ static void open_choice(int si)
 }
 
 static void back_to_game();
+static void check_for_updates();
+static void draw_updating();
 
 static void message(const std::wstring& title, const std::wstring& text)
 {
@@ -572,6 +575,9 @@ static void build_menu()
         {L"Game folder", 0xE838, [] { return g_root; }, [] { open_path(g_root); }},
         {L"Logs", 0xE8A5, [] { return std::wstring(L"The game's and the installer's logs"); },
          [] { CreateDirectoryW((g_root + L"\\out").c_str(), nullptr); open_path(g_root + L"\\out"); }},
+        {L"Check for updates", 0xE895, [] {
+            return L"Installed: " + version_text() + L". Your saves, settings, licences and DLC are kept.";
+        }, check_for_updates},
         {L"Support the project", 0xEB51, [] { return std::wstring(L"buymeacoffee.com/mpolizel"); },
          [] { open_path(L"https://buymeacoffee.com/mpolizel"); }},
         {L"About", 0xE946, [] {
@@ -905,7 +911,10 @@ static void render()
     }
 
     draw_header();
-    if (g_mode == Mode::Installing) {
+    if (g_mode == Mode::Updating) {
+        draw_menu(t);
+        draw_updating();
+    } else if (g_mode == Mode::Installing) {
         draw_installing();
     } else {
         draw_menu(t);
@@ -922,6 +931,7 @@ enum Key { K_LEFT, K_RIGHT, K_UP, K_DOWN, K_OK, K_BACK };
 
 static void on_key(Key k)
 {
+    if (g_mode == Mode::Updating) return;   // the update finishes on its own
     if (g_mode == Mode::Message) { if (k == K_OK || k == K_BACK) g_mode = Mode::Menu; return; }
     if (g_mode == Mode::Confirm) {
         if (k == K_OK) { g_mode = Mode::Menu; auto f = g_confirm_yes; if (f) f(); }
@@ -997,6 +1007,377 @@ static void back_to_game()
     goto_category(L"Settings");
 }
 
+// ------------------------------------------------------------- updates
+//
+// System > Check for updates asks GitHub for the latest release. When it is
+// newer than version.txt, and the player agrees, it downloads the release zip,
+// copies the saves (gamedata\) to save-backups\<time>_before_<version>, lays
+// the new files over the install and runs the installer once, which rebuilds
+// what changed. The player's own things are never written: gamedata\
+// (saves, trophies), licenses\, dlc\, game\ (the extracted and translated
+// game), build-mingw\ (the built game), cache\, out\, save-backups\,
+// config.ini and launcher.ini. Nothing is deleted. If the saves changed
+// during the copy anyway, the backup is put back.
+
+static const wchar_t kUpdateHost[] = L"api.github.com";
+static const wchar_t kUpdatePath[] = L"/repos/mpolizel/CHDPS3Recomp/releases/latest";
+
+struct UpdateState {
+    std::mutex m;
+    bool busy = false, finished = false, ok = false;
+    std::wstring step, error, latest, url, notes;
+    double done = 0, total = 0;
+};
+static UpdateState g_upd;
+static bool g_update_then_restart = false;   // the install that follows is the update's
+static HANDLE g_single = nullptr;            // the one-launcher-at-a-time mutex
+
+static std::string http_get(const std::wstring& host, const std::wstring& path, std::wstring& err,
+                            const std::wstring& to_file = L"", bool progress = false)
+{
+    std::string body;
+    HINTERNET s = WinHttpOpen(L"CHDLauncher", WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY,
+                              WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
+    if (!s) { err = L"No internet access."; return body; }
+    DWORD redirect = WINHTTP_OPTION_REDIRECT_POLICY_ALWAYS;
+    WinHttpSetOption(s, WINHTTP_OPTION_REDIRECT_POLICY, &redirect, sizeof redirect);
+    HINTERNET c = WinHttpConnect(s, host.c_str(), INTERNET_DEFAULT_HTTPS_PORT, 0);
+    HINTERNET r = nullptr;
+    if (c) {
+        r = WinHttpOpenRequest(c, L"GET", path.c_str(), nullptr, WINHTTP_NO_REFERER,
+                               WINHTTP_DEFAULT_ACCEPT_TYPES, WINHTTP_FLAG_SECURE);
+    }
+    FILE* out = nullptr;
+    if (r && WinHttpSendRequest(r, L"Accept: application/vnd.github+json\r\n", (DWORD)-1L,
+                                WINHTTP_NO_REQUEST_DATA, 0, 0, 0) &&
+        WinHttpReceiveResponse(r, nullptr)) {
+        DWORD status = 0, len = sizeof status;
+        WinHttpQueryHeaders(r, WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER,
+                            WINHTTP_HEADER_NAME_BY_INDEX, &status, &len, WINHTTP_NO_HEADER_INDEX);
+        DWORD clen = 0; len = sizeof clen;
+        WinHttpQueryHeaders(r, WINHTTP_QUERY_CONTENT_LENGTH | WINHTTP_QUERY_FLAG_NUMBER,
+                            WINHTTP_HEADER_NAME_BY_INDEX, &clen, &len, WINHTTP_NO_HEADER_INDEX);
+        if (status != 200) {
+            err = L"The update server answered " + std::to_wstring(status) + L".";
+        } else {
+            if (!to_file.empty()) out = _wfopen(to_file.c_str(), L"wb");
+            if (!to_file.empty() && !out) err = L"Could not write the download.";
+            double got = 0;
+            for (;;) {
+                DWORD avail = 0;
+                if (!WinHttpQueryDataAvailable(r, &avail) || avail == 0) break;
+                std::string chunk(avail, '\0');
+                DWORD read = 0;
+                if (!WinHttpReadData(r, &chunk[0], avail, &read) || read == 0) break;
+                if (out) fwrite(chunk.data(), 1, read, out); else body.append(chunk, 0, read);
+                got += read;
+                if (progress) { std::lock_guard<std::mutex> lk(g_upd.m); g_upd.done = got; g_upd.total = clen; }
+            }
+            if (clen && got < clen && err.empty()) err = L"The download was cut short.";
+        }
+    } else if (err.empty()) {
+        err = L"Could not reach GitHub. Check your internet connection.";
+    }
+    if (out) fclose(out);
+    if (r) WinHttpCloseHandle(r);
+    if (c) WinHttpCloseHandle(c);
+    WinHttpCloseHandle(s);
+    return body;
+}
+
+static std::string json_str(const std::string& j, const std::string& key, size_t from = 0, size_t* at = nullptr)
+{
+    size_t k = j.find("\"" + key + "\"", from);
+    if (k == std::string::npos) return "";
+    size_t q = j.find('"', j.find(':', k) + 1);
+    if (q == std::string::npos) return "";
+    std::string v;
+    for (size_t i = q + 1; i < j.size() && j[i] != '"'; ++i) {
+        if (j[i] == '\\' && i + 1 < j.size()) {
+            char e = j[++i];
+            v += e == 'n' ? '\n' : e == 'r' ? '\r' : e == 't' ? '\t' : e;
+        } else {
+            v += j[i];
+        }
+    }
+    if (at) *at = q;
+    return v;
+}
+
+static long version_value(const std::wstring& v)
+{
+    int a = 0, b = 0, c = 0;
+    swscanf(v.c_str() + (!v.empty() && (v[0] == L'v' || v[0] == L'V')), L"%d.%d.%d", &a, &b, &c);
+    return a * 10000L + b * 100L + c;
+}
+
+static void update_status(const std::wstring& step)
+{
+    std::lock_guard<std::mutex> lk(g_upd.m);
+    g_upd.step = step;
+    g_upd.done = g_upd.total = 0;
+}
+
+static void update_fail(const std::wstring& why)
+{
+    std::lock_guard<std::mutex> lk(g_upd.m);
+    g_upd.error = why;
+    g_upd.busy = false;
+    g_upd.finished = true;
+    g_upd.ok = false;
+}
+
+static void check_for_updates()
+{
+    {
+        std::lock_guard<std::mutex> lk(g_upd.m);
+        if (g_upd.busy) return;
+        g_upd.finished = g_upd.ok = false;
+        g_upd.error.clear(); g_upd.latest.clear(); g_upd.url.clear(); g_upd.notes.clear();
+        g_upd.done = g_upd.total = 0;
+        g_upd.busy = true;
+        g_upd.step = L"Checking for updates";
+    }
+    g_mode = Mode::Updating;
+    std::thread([] {
+        std::wstring err;
+        std::string j = http_get(kUpdateHost, kUpdatePath, err);
+        if (!err.empty()) { update_fail(err); return; }
+        std::string tag = json_str(j, "tag_name");
+        std::string url;
+        for (size_t at = 0;;) {
+            std::string u = json_str(j, "browser_download_url", at, &at);
+            if (u.empty()) break;
+            if (u.size() > 16 && u.compare(u.size() - 16, 16, "-windows-x64.zip") == 0) { url = u; break; }
+            ++at;
+        }
+        std::string notes = json_str(j, "body");
+        std::lock_guard<std::mutex> lk(g_upd.m);
+        g_upd.latest = widen(tag);
+        g_upd.url = widen(url);
+        g_upd.notes = widen(notes.substr(0, 600));
+        g_upd.busy = false;
+        g_upd.finished = true;
+        g_upd.ok = !tag.empty();
+        if (tag.empty()) g_upd.error = L"GitHub did not say which version is the latest.";
+    }).detach();
+}
+
+static bool run_hidden(const std::wstring& cmd, DWORD wait_ms)
+{
+    STARTUPINFOW si{};
+    si.cb = sizeof si;
+    PROCESS_INFORMATION pi{};
+    std::vector<wchar_t> cl(cmd.begin(), cmd.end());
+    cl.push_back(0);
+    if (!CreateProcessW(nullptr, cl.data(), nullptr, nullptr, FALSE, CREATE_NO_WINDOW, nullptr,
+                        g_root.c_str(), &si, &pi)) return false;
+    CloseHandle(pi.hThread);
+    bool ok = WaitForSingleObject(pi.hProcess, wait_ms) == WAIT_OBJECT_0;
+    DWORD code = 1;
+    GetExitCodeProcess(pi.hProcess, &code);
+    CloseHandle(pi.hProcess);
+    return ok && code == 0;
+}
+
+// Copy a tree file by file, skipping the top-level names in `keep`.
+// Returns the number of files that could not be written.
+static int copy_over(const std::wstring& from, const std::wstring& to, const std::vector<std::wstring>& keep,
+                     int depth = 0)
+{
+    int failed = 0;
+    WIN32_FIND_DATAW fd;
+    HANDLE h = FindFirstFileW((from + L"\\*").c_str(), &fd);
+    if (h == INVALID_HANDLE_VALUE) return 0;
+    CreateDirectoryW(to.c_str(), nullptr);
+    do {
+        std::wstring n = fd.cFileName;
+        if (n == L"." || n == L"..") continue;
+        if (depth == 0) {
+            bool skip = false;
+            for (const auto& k : keep) if (_wcsicmp(k.c_str(), n.c_str()) == 0) skip = true;
+            if (skip) continue;
+        }
+        std::wstring s = from + L"\\" + n, d = to + L"\\" + n;
+        if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) {
+            failed += copy_over(s, d, keep, depth + 1);
+        } else if (!CopyFileW(s.c_str(), d.c_str(), FALSE)) {
+            ++failed;
+        }
+    } while (FindNextFileW(h, &fd));
+    FindClose(h);
+    return failed;
+}
+
+// A fingerprint of every file under dir (names, sizes and contents), to make
+// sure the saves are exactly as they were.
+static unsigned long long tree_hash(const std::wstring& dir, const std::wstring& rel = L"")
+{
+    unsigned long long hsh = 1469598103934665603ull;
+    WIN32_FIND_DATAW fd;
+    HANDLE h = FindFirstFileW((dir + L"\\*").c_str(), &fd);
+    if (h == INVALID_HANDLE_VALUE) return hsh;
+    std::vector<std::wstring> names;
+    do { std::wstring n = fd.cFileName; if (n != L"." && n != L"..") names.push_back(n); } while (FindNextFileW(h, &fd));
+    FindClose(h);
+    std::sort(names.begin(), names.end());
+    for (const auto& n : names) {
+        std::wstring p = dir + L"\\" + n;
+        for (wchar_t ch : rel + L"/" + n) { hsh ^= (unsigned)ch; hsh *= 1099511628211ull; }
+        if (GetFileAttributesW(p.c_str()) & FILE_ATTRIBUTE_DIRECTORY) {
+            hsh ^= tree_hash(p, rel + L"/" + n); hsh *= 1099511628211ull;
+        } else if (FILE* f = _wfopen(p.c_str(), L"rb")) {
+            char buf[65536];
+            size_t got;
+            while ((got = fread(buf, 1, sizeof buf, f)) > 0)
+                for (size_t i = 0; i < got; ++i) { hsh ^= (unsigned char)buf[i]; hsh *= 1099511628211ull; }
+            fclose(f);
+        }
+    }
+    return hsh;
+}
+
+static void apply_update()
+{
+    std::wstring url, latest;
+    {
+        std::lock_guard<std::mutex> lk(g_upd.m);
+        url = g_upd.url; latest = g_upd.latest;
+        g_upd.busy = true; g_upd.finished = false; g_upd.error.clear();
+    }
+    g_mode = Mode::Updating;
+    std::thread([url, latest] {
+        std::wstring work = g_root + L"\\cache\\update";
+        run_hidden(L"cmd /c rmdir /s /q \"" + work + L"\"", 60000);
+        CreateDirectoryW((g_root + L"\\cache").c_str(), nullptr);
+        CreateDirectoryW(work.c_str(), nullptr);
+
+        // 1. Download (a github.com URL that redirects to the file).
+        update_status(L"Downloading " + latest);
+        URL_COMPONENTS uc{};
+        uc.dwStructSize = sizeof uc;
+        wchar_t host[256], path[2048];
+        uc.lpszHostName = host; uc.dwHostNameLength = 256;
+        uc.lpszUrlPath = path; uc.dwUrlPathLength = 2048;
+        if (!WinHttpCrackUrl(url.c_str(), 0, 0, &uc)) { update_fail(L"The release has no Windows package."); return; }
+        std::wstring zip = work + L"\\release.zip", err;
+        http_get(host, path, err, zip, true);
+        if (!err.empty()) { update_fail(err); return; }
+
+        // 2. Unpack (tar.exe ships with Windows 10 and 11 and reads zip).
+        update_status(L"Unpacking");
+        std::wstring x = work + L"\\x";
+        CreateDirectoryW(x.c_str(), nullptr);
+        if (!run_hidden(L"tar.exe -xf \"" + zip + L"\" -C \"" + x + L"\"", 600000)) {
+            update_fail(L"The downloaded package could not be unpacked.");
+            return;
+        }
+        std::wstring src;
+        WIN32_FIND_DATAW fd;
+        HANDLE h = FindFirstFileW((x + L"\\CHDPS3Recomp-*").c_str(), &fd);
+        if (h != INVALID_HANDLE_VALUE) { src = x + L"\\" + fd.cFileName; FindClose(h); }
+        if (src.empty() || !file_exists(src + L"\\tools\\install.py") || !file_exists(src + L"\\version.txt")) {
+            update_fail(L"The downloaded package is not a CHDPS3Recomp release.");
+            return;
+        }
+
+        // 3. Saves first: a dated copy that is never deleted.
+        update_status(L"Backing up your saves");
+        std::wstring saves = g_root + L"\\gamedata", backup;
+        unsigned long long before = 0;
+        if (dir_exists(saves)) {
+            SYSTEMTIME st; GetLocalTime(&st);
+            wchar_t stamp[64];
+            swprintf(stamp, 64, L"%04d-%02d-%02d_%02d%02d%02d", st.wYear, st.wMonth, st.wDay,
+                     st.wHour, st.wMinute, st.wSecond);
+            CreateDirectoryW((g_root + L"\\save-backups").c_str(), nullptr);
+            backup = g_root + L"\\save-backups\\" + stamp + L"_before_" + latest;
+            if (copy_over(saves, backup, {}) != 0) { update_fail(L"Your saves could not be backed up, so nothing was changed."); return; }
+            before = tree_hash(saves);
+        }
+
+        // 4. The new files over the install. The running launcher is renamed
+        // out of the way (Windows lets a running exe be renamed, not replaced).
+        update_status(L"Copying the new version");
+        wchar_t self[MAX_PATH];
+        GetModuleFileNameW(nullptr, self, MAX_PATH);
+        std::wstring self_old = std::wstring(self) + L".old";
+        DeleteFileW(self_old.c_str());
+        MoveFileW(self, self_old.c_str());
+        static const std::vector<std::wstring> keep = {
+            L"gamedata", L"save-backups", L"licenses", L"dlc", L"game", L"build-mingw", L"cache", L"out",
+            L"config.ini", L"launcher.ini"};
+        int failed = copy_over(src, g_root, keep);
+        if (!file_exists(self)) MoveFileW(self_old.c_str(), self);   // the copy did not bring one: keep ours
+        if (failed) { update_fail(std::to_wstring(failed) + L" files could not be replaced. Close the game and try again."); return; }
+
+        // 5. The saves must be exactly as before; if not, put the backup back.
+        if (!backup.empty() && tree_hash(saves) != before) {
+            copy_over(backup, saves, {});
+            update_fail(L"Your saves changed during the update, so the backup was put back. Try again.");
+            return;
+        }
+        run_hidden(L"cmd /c rmdir /s /q \"" + work + L"\"", 60000);
+        std::lock_guard<std::mutex> lk(g_upd.m);
+        g_upd.busy = false; g_upd.finished = true; g_upd.ok = true;
+        g_upd.step = L"applied";
+    }).detach();
+}
+
+static void poll_update()
+{
+    bool finished = false, ok = false;
+    std::wstring step, error, latest, url, notes;
+    {
+        std::lock_guard<std::mutex> lk(g_upd.m);
+        if (!g_upd.finished) return;
+        g_upd.finished = false;
+        ok = g_upd.ok; step = g_upd.step; error = g_upd.error;
+        latest = g_upd.latest; url = g_upd.url; notes = g_upd.notes;
+        finished = true;
+    }
+    if (!finished) return;
+    g_mode = Mode::Menu;
+    if (!ok) { message(L"Update", error.empty() ? L"The update could not be completed." : error); return; }
+    if (step == L"applied") {
+        // Rebuild what the new version changed; the launcher restarts after.
+        std::wstring why;
+        g_update_then_restart = true;
+        if (!start_install(L"", L"", why)) { g_update_then_restart = false; message(L"Update", why); return; }
+        g_mode = Mode::Installing;
+        return;
+    }
+    std::wstring current = version_text();
+    if (version_value(latest) <= version_value(current)) {
+        message(L"No update", L"You have the latest version (" + current + L").");
+    } else if (url.empty()) {
+        message(L"Update", L"Version " + latest + L" is out, but it has no Windows package yet.");
+    } else {
+        std::wstring first;
+        for (wchar_t ch : notes) { if (ch == L'\n' && first.size() > 200) break; first += ch; }
+        confirm(L"Update to " + latest + L"?",
+                L"You have " + current + L". Your saves, settings, licences and DLC are kept, and a copy of "
+                L"your saves is made first. The game is then rebuilt where it changed, which takes a few minutes.",
+                [] { apply_update(); });
+    }
+}
+
+static void draw_updating()
+{
+    std::lock_guard<std::mutex> lk(g_upd.m);
+    float x = 290, y = 230, w = 700, h = 220;
+    panel(x, y, w, h);
+    color(1, 1, 1);
+    text(L"Update", f_h1, x + 40, y + 34, w - 80, 36);
+    color(1, 1, 1, 0.9f);
+    text(g_upd.step, f_body, x + 40, y + 92, w - 80, 26);
+    if (g_upd.total > 0) {
+        bar(x + 40, y + 132, w - 80, (float)(g_upd.done / g_upd.total));
+        color(1, 1, 1, 0.7f);
+        text(human(g_upd.done, true) + L" of " + human(g_upd.total, true), f_small, x + 40, y + 150, w - 80, 22);
+    }
+}
+
 static void poll_install()
 {
     bool finished = false; int code = 0; std::wstring err;
@@ -1006,6 +1387,26 @@ static void poll_install()
     }
     if (!finished) return;
     if (g_mode == Mode::Confirm || g_mode == Mode::Installing) g_mode = Mode::Menu;
+    if (code == 0 && g_update_then_restart) {
+        // The update is in place and built: start the new launcher, close this one.
+        g_update_then_restart = false;
+        wchar_t self[MAX_PATH];
+        GetModuleFileNameW(nullptr, self, MAX_PATH);
+        STARTUPINFOW si{}; si.cb = sizeof si;
+        PROCESS_INFORMATION pi{};
+        // Let go of the one-launcher mutex first: the new launcher, finding
+        // it held, would hand over to this one and close, and then this one
+        // closes too, leaving none.
+        if (g_single) { ReleaseMutex(g_single); CloseHandle(g_single); g_single = nullptr; }
+        if (CreateProcessW(self, nullptr, nullptr, nullptr, FALSE, 0, nullptr, g_root.c_str(), &si, &pi)) {
+            CloseHandle(pi.hThread); CloseHandle(pi.hProcess);
+            PostMessageW(g_hwnd, WM_CLOSE, 0, 0);
+            return;
+        }
+        message(L"Updated", L"The new version is installed. Open the launcher again to use it.");
+        return;
+    }
+    g_update_then_restart = false;
     if (code == 0) {
         goto_category(L"Game");
         g_cats[g_cat].sel = 0;
@@ -1132,6 +1533,7 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR cmdline, int show)
     CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
     bool want_settings = cmdline && wcsstr(cmdline, L"--settings");
     HANDLE single = CreateMutexW(nullptr, TRUE, L"CHDPS3RecompLauncher");
+    g_single = single;
     if (GetLastError() == ERROR_ALREADY_EXISTS) {
         HWND other = FindWindowW(L"CHDLauncher", nullptr);
         if (other && want_settings) PostMessageW(other, WM_APP_SHOW_SETTINGS, 0, 0);
@@ -1140,6 +1542,11 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR cmdline, int show)
     }
     find_root();
     init_settings();
+    {   // a launcher left behind by an update (renamed so the new one could be written)
+        wchar_t self[MAX_PATH];
+        GetModuleFileNameW(nullptr, self, MAX_PATH);
+        DeleteFileW((std::wstring(self) + L".old").c_str());
+    }
     if (HMODULE x = LoadLibraryW(L"xinput1_4.dll")) g_xget = (XInputGetStateFn)GetProcAddress(x, "XInputGetState");
 
     D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED, &g_d2d);
@@ -1181,6 +1588,7 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR cmdline, int show)
             DispatchMessageW(&msg);
         }
         poll_install();
+        poll_update();
         if (!IsWindowVisible(g_hwnd) || IsIconic(g_hwnd)) { Sleep(50); continue; }
         poll_pad();
         render();        // EndDraw waits for the display's refresh
@@ -1188,7 +1596,7 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR cmdline, int show)
 out:
     if (g_job) CloseHandle(g_job);  // kill-on-close: no installer is left running
     release_target();
-    CloseHandle(single);
+    if (g_single) CloseHandle(g_single);
     CoUninitialize();
     return 0;
 }

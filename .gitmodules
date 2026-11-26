@@ -1,3 +1,6 @@
 [submodule "ext/ps3recomp"]
 	path = ext/ps3recomp
 	url = https://github.com/sp00nznet/ps3recomp.git
+[submodule "ext/rl-achievements"]
+	path = ext/rl-achievements
+	url = https://github.com/elripalda/RecompAchievements.git
