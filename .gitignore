@@ -23,3 +23,8 @@ build/
 __pycache__/
 spu/
 spu_images/
+
+# Installer output
+cache/
+dev_flash/
+licenses/

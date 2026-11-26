@@ -1,0 +1,36 @@
+{
+  "$schema": "https://recomp.fyi/schema/v1.json",
+  "game": "Castlevania: Harmony of Despair",
+  "wikidata": "Q2761773",
+  "system": "PS3",
+  "type": "recomp",
+  "original": {
+    "region": "USA",
+    "revision": "1.01",
+    "serial": "NPUB30505"
+  },
+  "project": "Castlevania: Harmony of Despair PS3 Recomp",
+  "status": "in-progress",
+  "targets": [
+    "Windows"
+  ],
+  "toolchain": "ps3recomp",
+  "approach": "Static recompilation of the PS3 PSN release (EBOOT, 118 PRX modules and the Multistream SPU mixer) to C++ with ps3recomp, built into a native Windows program on the player's PC, with a D3D12 renderer",
+  "maintainers": [
+    {
+      "name": "mpolizel",
+      "link": "https://github.com/mpolizel"
+    }
+  ],
+  "links": [
+    {
+      "label": "Buy me a coffee",
+      "url": "https://buymeacoffee.com/mpolizel"
+    }
+  ],
+  "help": [
+    "Testing the stages and the DLC characters",
+    "Online and local multiplayer"
+  ],
+  "notes": "No game data or keys are included. The player supplies their own PSN package (and .rap licence for the full version) and the game is built on their PC. Chapter 1 plays with sound and music; the PS3 firmware's ATRAC decoder is downloaded from Sony during setup."
+}

@@ -2,6 +2,29 @@
 
 Static recompilation of *Castlevania: Harmony of Despair* (PSN, **NPUB30505**, USA) to native Windows, built with [ps3recomp](https://github.com/sp00nznet/ps3recomp) (submodule in `ext/ps3recomp`).
 
+## Install
+
+You need the game's PSN package and, for the full version, its `.rap` licence. Then run:
+
+```powershell
+install.bat <UP0101-NPUB30505_00-CASTHARMONYOFDES.pkg> [licence.rap]
+```
+
+The installer ([tools/install.py](tools/install.py)) does the rest:
+1. Checks the package.
+2. Extracts the package.
+3. Decrypts the EBOOT and the 118 modules ([tools/ps3crypt.py](tools/ps3crypt.py); no RPCS3 needed).
+4. Downloads the PS3 firmware from Sony's servers and keeps only its ATRAC decoder.
+5. Translates the game to C++ and builds it.
+
+If it stops, run it again and it picks up where it left off. It needs Git, Python 3 and Visual Studio with "C++ Clang tools for Windows". The first build takes about 45 minutes.
+
+No keys are in the repository. `ps3crypt.py` reads them from RPCS3's public `key_vault.cpp`/`.h`, downloaded at install time. The game's own klicensee is read from the player's EBOOT.
+
+The `.rap` is copied to `licenses/`. Running as the trial without it is planned but not done yet: today the game always runs as the full version.
+
+The manual steps below are what the installer automates.
+
 ## Original files (not in the repo)
 
 | File | Content ID | Purpose |
