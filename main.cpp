@@ -455,7 +455,10 @@ static void port_windowless_setup(int* argc, char*** argv)
         snprintf(log, sizeof log, "%s/out", dir);
         CreateDirectoryA(log, NULL);
         snprintf(log, sizeof log, "%s/out/run.log", dir);
-        if (freopen(log, "w", stdout)) setvbuf(stdout, NULL, _IOLBF, 4096);
+        /* Truncate once, then both streams append: with "w" for stdout its
+         * own file position wrote over what stderr had appended. */
+        if (FILE* f = fopen(log, "w")) fclose(f);
+        if (freopen(log, "a", stdout)) setvbuf(stdout, NULL, _IOLBF, 4096);
         if (freopen(log, "a", stderr)) setvbuf(stderr, NULL, _IONBF, 0);
     }
     if (*argc < 2) {
