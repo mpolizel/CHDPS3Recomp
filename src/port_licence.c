@@ -15,6 +15,7 @@
  * minimises with it), which keeps the renderer untouched.
  */
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include "ps3emu/ps3types.h"
@@ -62,10 +63,76 @@ static void verify_upgrade_license(ppu_context* ctx)
     ctx->gpr[3] = ok ? CELL_OK : (s32)SCE_NP_DRM_ERROR_LICENSE_NOT_FOUND;
 }
 
+/* DLC. The game asks sceNpDrmIsAvailable(klicensee, path) about each DLC's
+ * EDAT (data/key.edat, data/stage/stageNN_def.edat) and offers the DLC when
+ * it answers OK. ps3recomp's handler records the klicensee and always answers
+ * OK, so any DLC whose files were present was unlocked. As on the console,
+ * an EDAT that belongs to a DLC is available only with that DLC's licence,
+ * licenses/<its content id>.rap; the base game's own EDATs (content id
+ * ...CASTHARMONYOFDES: Julius, Yoko and the Pyramid stage come with the game)
+ * and anything that is not an NPD file are answered as before. */
+#define NID_sceNpDrmIsAvailable 0xAD218FAFu
+#define GAME_CONTENT_SUFFIX "CASTHARMONYOFDES"
+
+extern void edat_add_klicensee(const uint8_t klic[16]);
+
+static int edat_content_id(const char* guest_path, char* cid, size_t cap)
+{
+    const char* vfs = getenv("PS3_VFS_ROOT");
+    const char* rel = strncmp(guest_path, "/dev_bdvd/", 10) == 0 ? guest_path + 10 : NULL;
+    if (!vfs || !rel) return 0;
+    char host[1024];
+    snprintf(host, sizeof host, "%s/%s", vfs, rel);
+    FILE* f = fopen(host, "rb");
+    if (!f) return 0;
+    unsigned char h[0x40];
+    size_t n = fread(h, 1, sizeof h, f);
+    fclose(f);
+    if (n < sizeof h || memcmp(h, "NPD", 4) != 0) return 0;
+    size_t i = 0;
+    for (; i + 1 < cap && i < 0x30 && h[0x10 + i]; ++i) cid[i] = (char)h[0x10 + i];
+    cid[i] = 0;
+    return i > 0;
+}
+
+static void drm_is_available(ppu_context* ctx)
+{
+    u32 k = (u32)ctx->gpr[3], p = (u32)ctx->gpr[4];
+    if (k) edat_add_klicensee(vm_base + k);
+    char path[512] = {0}, cid[64] = {0};
+    if (p) {
+        const char* s = (const char*)(vm_base + p);
+        for (int i = 0; i < 510 && s[i]; ++i) path[i] = s[i];
+    }
+    s32 rc = CELL_OK;
+    size_t len = strlen(cid);
+    if (edat_content_id(path, cid, sizeof cid) && (len = strlen(cid)) &&
+        !(len >= strlen(GAME_CONTENT_SUFFIX) && strcmp(cid + len - strlen(GAME_CONTENT_SUFFIX), GAME_CONTENT_SUFFIX) == 0) &&
+        !licence_present(cid))
+        rc = (s32)SCE_NP_DRM_ERROR_LICENSE_NOT_FOUND;
+    /* The game asks again every frame while a DLC is unlicensed: log each
+     * distinct answer once. */
+    static char seen[24][96];
+    static int nseen = 0;
+    char key[96];
+    snprintf(key, sizeof key, "%d%s", rc == CELL_OK, path + (strlen(path) > 90 ? strlen(path) - 90 : 0));
+    int known = 0;
+    for (int i = 0; i < nseen; ++i) if (strcmp(seen[i], key) == 0) { known = 1; break; }
+    if (!known) {
+        if (nseen < 24) snprintf(seen[nseen++], sizeof seen[0], "%s", key);
+        fprintf(stderr, "[licence] DLC check %s: %s\n", path,
+                !cid[0] ? "not a licensed file" :
+                rc != CELL_OK ? "no licence (the DLC is not offered)" :
+                strstr(cid, GAME_CONTENT_SUFFIX) ? "part of the base game" : "licence found");
+    }
+    ctx->gpr[3] = rc;
+}
+
 void port_licence_register(void)
 {
     ps3_hle_register_ctx(NID_sceNpDrmVerifyUpgradeLicense, "sceNpDrmVerifyUpgradeLicense", verify_upgrade_license);
     ps3_hle_register_ctx(NID_sceNpDrmVerifyUpgradeLicense2, "sceNpDrmVerifyUpgradeLicense2", verify_upgrade_license);
+    ps3_hle_register_ctx(NID_sceNpDrmIsAvailable, "sceNpDrmIsAvailable", drm_is_available);
 }
 
 /* ------------------------------------------------------------------ label */

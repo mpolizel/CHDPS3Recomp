@@ -209,6 +209,8 @@ def step_extract(a):
     run([PY, "-I", os.path.join(TOOLS, "pkg_extract.py"), a.pkg, BASE])
     if not os.path.isfile(os.path.join(BASE, "USRDIR", "EBOOT.BIN")):
         raise InstallError("The package did not contain the game (no EBOOT.BIN).", EXIT_WRONG_GAME)
+    for cid in overlay_dlcs():
+        say(f"DLC {cid} put back")
     vfs = os.path.join(GAME, "vfs", "PS3_GAME")
     os.makedirs(os.path.dirname(vfs), exist_ok=True)
     if not os.path.exists(vfs):
@@ -370,13 +372,166 @@ STEPS = [
 ]
 
 
+# ----------------------------------------------------------------------- DLC
+#
+# A DLC is its PSN package plus the player's .rap, usually zipped together.
+# Most of the DLC content is already in the base package; what a DLC adds is
+# its key.edat (and for the stages, the stage's data and music), encrypted for
+# its content ID. The runtime decrypts those EDATs with a key derived from the
+# .rap, written beside each one as <file>.edat.rifkey (libs/filesystem/edat.c).
+# The DLC's files are kept in dlc/<content id>/ and laid over game/base, so a
+# reinstall of the game puts them back.
+
+DLC_DIR = os.path.join(ROOT, "dlc")
+DLC_PREFIX = "UP0101-NPUB30505_00-"
+
+
+def _pkg_content_id(path):
+    with open(path, "rb") as f:
+        hdr = f.read(0x60)
+    if hdr[:4] != b"\x7fPKG":
+        return None
+    return hdr[0x30:0x54].split(b"\0")[0].decode("ascii", "replace")
+
+
+def overlay_dlcs():
+    """Lay every installed DLC's files over game/base."""
+    if not os.path.isdir(DLC_DIR) or not os.path.isdir(BASE):
+        return []
+    done = []
+    for cid in sorted(os.listdir(DLC_DIR)):
+        src = os.path.join(DLC_DIR, cid, "USRDIR")
+        if not os.path.isdir(src):
+            continue
+        for dp, _, files in os.walk(src):
+            for f in files:
+                s = os.path.join(dp, f)
+                d = os.path.join(BASE, "USRDIR", os.path.relpath(s, src))
+                os.makedirs(os.path.dirname(d), exist_ok=True)
+                shutil.copy2(s, d)
+                if os.path.exists(d + ".dec"):        # a stale decrypted copy
+                    os.remove(d + ".dec")
+        done.append(cid)
+    return done
+
+
+def add_dlc(path, rap_arg=None):
+    """Install a DLC from a zip (PKG + .rap), a PKG (with --rap, or its .rap
+    beside it) or a folder holding both."""
+    import tempfile, zipfile
+    if not path or not os.path.exists(path):
+        raise InstallError("Choose the DLC's zip (its .pkg and its .rap).")
+    if "build" not in load_state().get("done", []):
+        raise InstallError("Install the game first, then add DLC.")
+    keys = ps3crypt.fetch_key_vault(KEYS)
+    tmp = tempfile.mkdtemp(prefix="chd-dlc-", dir=os.path.join(ROOT, "cache"))
+    try:
+        pkgs, raps = [], []
+        if zipfile.is_zipfile(path):
+            with zipfile.ZipFile(path) as z:
+                for m in z.infolist():
+                    name = os.path.basename(m.filename)
+                    if name.lower().endswith((".pkg", ".rap")) and not m.is_dir():
+                        out = os.path.join(tmp, name)
+                        with z.open(m) as zs, open(out, "wb") as fo:
+                            shutil.copyfileobj(zs, fo)
+                        (pkgs if name.lower().endswith(".pkg") else raps).append(out)
+        elif os.path.isdir(path):
+            for f in os.listdir(path):
+                full = os.path.join(path, f)
+                if f.lower().endswith(".pkg"): pkgs.append(full)
+                if f.lower().endswith(".rap"): raps.append(full)
+        else:
+            pkgs.append(path)
+            folder = os.path.dirname(os.path.abspath(path))
+            raps += [os.path.join(folder, f) for f in os.listdir(folder) if f.lower().endswith(".rap")]
+        if rap_arg:
+            raps.append(rap_arg)
+        if not pkgs:
+            raise InstallError("There is no DLC package (.pkg) in what you chose.", EXIT_WRONG_GAME)
+
+        installed = []
+        for pkg in pkgs:
+            cid = _pkg_content_id(pkg)
+            if not cid or not cid.startswith(DLC_PREFIX) or cid.endswith("CASTHARMONYOFDES"):
+                raise InstallError(f"{os.path.basename(pkg)} is not a DLC of Castlevania: Harmony of Despair (USA).", EXIT_WRONG_GAME)
+            rap = next((r for r in raps if os.path.basename(r).lower() == (cid + ".rap").lower()), None)
+            if not rap:
+                raise InstallError(f"The licence for this DLC is missing: {cid}.rap. Put it in the zip with the package.", EXIT_LICENCE)
+            rap_bytes = open(rap, "rb").read()
+            if len(rap_bytes) != 16:
+                raise InstallError(f"{os.path.basename(rap)} is not a valid licence (a .rap is 16 bytes).", EXIT_LICENCE)
+            say(f"DLC {cid}")
+            out = os.path.join(tmp, cid)
+            run([PY, "-I", os.path.join(TOOLS, "pkg_extract.py"), pkg, out])
+            usr = os.path.join(out, "USRDIR")
+            if not os.path.isdir(usr):
+                raise InstallError(f"{cid} has no game files: it is not a playable DLC (an avatar or theme?).", EXIT_WRONG_GAME)
+            rif = ps3crypt.rap_to_rif(rap_bytes, keys)
+            new_code = []
+            dest = os.path.join(DLC_DIR, cid)
+            if os.path.isdir(dest):
+                shutil.rmtree(dest)
+            for dp, _, files in os.walk(usr):
+                for f in files:
+                    s = os.path.join(dp, f)
+                    rel = os.path.relpath(s, usr)
+                    d = os.path.join(dest, "USRDIR", rel)
+                    os.makedirs(os.path.dirname(d), exist_ok=True)
+                    shutil.copy2(s, d)
+                    if f.lower().endswith(".edat") and ps3crypt.npd_content_id(s) == cid:
+                        with open(d + ".rifkey", "wb") as k:
+                            k.write(rif)
+                    if f.lower().endswith(".sprx"):
+                        base = os.path.join(BASE, "USRDIR", rel)
+                        if not os.path.exists(base) or open(base, "rb").read() != open(s, "rb").read():
+                            new_code.append(rel)
+            os.makedirs(LICENSES, exist_ok=True)
+            shutil.copyfile(rap, os.path.join(LICENSES, cid + ".rap"))
+            installed.append((cid, new_code))
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+    overlay_dlcs()
+    code = [c for _, cs in installed for c in cs]
+    if code:
+        # New game code: decrypt, translate and rebuild it like the game's own.
+        say(f"the DLC brings {len(code)} new code module(s): translating and building them")
+        st = load_state()
+        st["done"] = [s for s in st["done"] if s not in ("decrypt", "prx", "build")]
+        save_state(st)
+        redo = [(sid, title, fn) for sid, title, fn in STEPS if sid in ("decrypt", "prx", "build")]
+        for n, (sid, title, fn) in enumerate(redo, 1):
+            if True:
+                say(f"@step {n} {len(redo)} {sid} {title}")
+                fn(argparse.Namespace(pkg=None, rap=None, pup=None))
+                st["done"].append(sid)
+                save_state(st)
+    for cid, _ in installed:
+        say(f"installed DLC {cid}")
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("--pkg", help="the game's PKG (UP0101-NPUB30505_00-...)")
     ap.add_argument("--rap", help="licence for the full version (.rap), optional")
     ap.add_argument("--pup", help="a PS3UPDAT.PUP you already have, instead of downloading it")
     ap.add_argument("--restart", action="store_true", help="redo every step")
+    ap.add_argument("--dlc", help="add a DLC: its zip (.pkg + .rap), its .pkg, or a folder with both")
     a = ap.parse_args()
+
+    if a.dlc:
+        try:
+            say("@step 1 1 dlc Adding the DLC")
+            add_dlc(a.dlc, a.rap)
+        except InstallError as e:
+            say(f"@error {e}")
+            return e.code
+        except (urllib.error.URLError, TimeoutError) as e:
+            say(f"@error Download failed: {e}. Check your internet connection and try again.")
+            return EXIT_DOWNLOAD
+        say("@done")
+        return 0
 
     st = {"done": []} if a.restart else load_state()
     # A different package invalidates everything after the check.

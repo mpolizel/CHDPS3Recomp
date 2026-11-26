@@ -40,6 +40,24 @@ In the launcher, under **Installation**, choose your game package, then **Instal
 
 The launcher's menu is inspired by the PS3's, with its own art. It runs with keyboard, controller (XInput) or mouse, shows the installation's progress, and comes back when the game closes. The source is [launcher/launcher.cpp](launcher/launcher.cpp). `build_launcher.bat` builds it with the portable toolchain; the release ships it built, since it holds no game code.
 
+### DLC
+
+In the launcher, choose **Licences > Add DLC** and pick the DLC's zip. The zip holds the DLC's `.pkg` and its `.rap` licence. A `.pkg` with its `.rap` beside it works too.
+
+Most of each DLC is already in the base package. The installer adds what the DLC brings on top:
+- its `key.edat`;
+- for the stages, the stage's data and music.
+
+It also saves the key derived from the `.rap` beside the DLC's EDATs, and keeps the DLC in `dlc/` so a reinstall puts it back. A DLC with new game code would be translated and built like the game's own.
+
+From the command line:
+
+```powershell
+install.bat --dlc=<dlc.zip>
+```
+
+As on a PS3, a DLC is offered only with its licence: the game asks `sceNpDrmIsAvailable` about each DLC's EDAT, and [src/port_licence.c](src/port_licence.c) answers OK when `licenses/<content id>.rap` is there. Julius, Yoko and the Pyramid stage are part of the base game in version 1.01, so they need nothing. A PSN avatar or theme package is refused: it has no game files.
+
 You can also install through [RecompLauncher](https://recomplauncher.com): pick the package and, for the full game, the `.rap`. It runs the installer with no console window ([recomplauncher.json](recomplauncher.json)).
 
 From a copy of this repository, run:

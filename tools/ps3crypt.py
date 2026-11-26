@@ -37,6 +37,10 @@ class Keys:
         self.klic_key = arr("NP_KLIC_KEY")
         self.scepkg_erk = arr("SCEPKG_ERK")
         self.scepkg_riv = arr("SCEPKG_RIV")
+        self.rap_key = arr("RAP_KEY")
+        self.rap_pbox = arr("RAP_PBOX")
+        self.rap_e1 = arr("RAP_E1")
+        self.rap_e2 = arr("RAP_E2")
         body = cpp[cpp.index("void KeyVault::LoadSelfNPDRMKeys()"):]
         body = body[:body.index("\n}\n")]
         self.npdrm = {}
@@ -141,6 +145,42 @@ def decrypt_self(data, keys, klic=None):
         put(e_shoff, data[shdr_off:shdr_off + e_shnum * e_shentsize])
     put(e_phoff, b"".join(phdrs))
     return bytes(out)
+
+
+def rap_to_rif(rap, keys):
+    """The licence key a DLC's EDATs decrypt with, from the player's 16-byte
+    .rap (RPCS3's rap_to_rif): an AES-128-CBC decrypt, then five rounds of a
+    byte permutation with two constant masks."""
+    if len(rap) != 16:
+        raise ValueError("a .rap file is 16 bytes")
+    key = bytearray(AES.new(keys.rap_key, AES.MODE_CBC, bytes(16)).decrypt(rap))
+    pbox, e1, e2 = keys.rap_pbox, keys.rap_e1, keys.rap_e2
+    for _ in range(5):
+        for i in range(16):
+            p = pbox[i]
+            key[p] ^= e1[p]
+        for i in range(15, 0, -1):
+            key[pbox[i]] ^= key[pbox[i - 1]]
+        o = 0
+        for i in range(16):
+            p = pbox[i]
+            kc = (key[p] - o) & 0xFF
+            ec2 = e2[p]
+            if o != 1 or kc != 0xFF:
+                o = 1 if kc < ec2 else 0
+                key[p] = (kc - ec2) & 0xFF
+            else:                       # o == 1 and kc == 0xFF
+                key[p] = (kc - ec2) & 0xFF
+    return bytes(key)
+
+
+def npd_content_id(path):
+    """The content ID an EDAT belongs to (its NPD header), or None."""
+    with open(path, "rb") as f:
+        h = f.read(0x40)
+    if len(h) < 0x40 or h[:4] != b"NPD\0":
+        return None
+    return h[0x10:0x40].split(b"\0")[0].decode("ascii", "replace")
 
 
 def decrypt_sce_package(data, keys):

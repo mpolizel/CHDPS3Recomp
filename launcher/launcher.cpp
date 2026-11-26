@@ -114,13 +114,20 @@ static bool game_installed()
            read_text(g_root + L"\\game\\install_state.json").find(L"\"build\"") != std::wstring::npos;
 }
 
-static std::wstring licence_file()
+static const wchar_t kFullLicence[] = L"UP0101-NPUB30505_00-CVHDZDLCZUNLOCKZ.rap";
+
+static bool full_licence() { return file_exists(g_root + L"\\licenses\\" + kFullLicence); }
+
+// The DLC licences: every .rap but the full version's.
+static int dlc_licences()
 {
+    int n = 0;
     WIN32_FIND_DATAW fd;
     HANDLE h = FindFirstFileW((g_root + L"\\licenses\\*.rap").c_str(), &fd);
-    if (h == INVALID_HANDLE_VALUE) return L"";
+    if (h == INVALID_HANDLE_VALUE) return 0;
+    do { if (_wcsicmp(fd.cFileName, kFullLicence) != 0) ++n; } while (FindNextFileW(h, &fd));
     FindClose(h);
-    return fd.cFileName;
+    return n;
 }
 
 static std::wstring version_text()
@@ -180,7 +187,10 @@ static void install_line(const std::wstring& line)
 
 static std::wstring quote(const std::wstring& s) { return L"\"" + s + L"\""; }
 
-static bool start_install(const std::wstring& pkg, const std::wstring& rap, std::wstring& why)
+static bool g_installing_dlc = false;   // the running install adds a DLC
+
+static bool start_install(const std::wstring& pkg, const std::wstring& rap, std::wstring& why,
+                          const std::wstring& dlc = L"")
 {
     std::wstring py = g_root + L"\\python\\python.exe";
     if (!file_exists(py)) py = g_root + L"\\.venv\\Scripts\\python.exe";
@@ -189,6 +199,8 @@ static bool start_install(const std::wstring& pkg, const std::wstring& rap, std:
     std::wstring cmd = quote(py) + L" -u " + quote(g_root + L"\\tools\\install.py");
     if (!pkg.empty()) cmd += L" " + quote(L"--pkg=" + pkg);
     if (!rap.empty()) cmd += L" " + quote(L"--rap=" + rap);
+    if (!dlc.empty()) cmd += L" " + quote(L"--dlc=" + dlc);
+    g_installing_dlc = !dlc.empty();
 
     SECURITY_ATTRIBUTES sa{sizeof sa, nullptr, TRUE};
     HANDLE rd = nullptr, wr = nullptr;
@@ -418,6 +430,20 @@ static void goto_category(const wchar_t* label)
         if (g_cats[i].label == label) g_cat = (int)i;
 }
 
+static void add_dlc()
+{
+    if (!game_installed()) {
+        message(L"Install the game first", L"DLC is added to an installed game. Install it under Installation, then add the DLC.");
+        return;
+    }
+    std::wstring p = pick_file(g_hwnd, L"Choose the DLC (its zip with the .pkg and the .rap)",
+                               L"DLC (*.zip; *.pkg)", L"*.zip;*.pkg");
+    if (p.empty()) return;
+    std::wstring why;
+    if (!start_install(L"", L"", why, p)) { message(L"Add DLC", why); return; }
+    g_mode = Mode::Installing;
+}
+
 static void do_install()
 {
     std::wstring pkg = ini_get(L"Package");
@@ -484,18 +510,21 @@ static void build_menu()
                                     : std::wstring(L"Install the game first");
         }, play},
         {L"Edition", 0xE946, [] {
-            std::wstring l = licence_file();
-            return l.empty() ? std::wstring(L"Trial: add your .rap licence under Licences for the full game")
-                             : L"Full version (licence " + l + L")";
+            return full_licence() ? std::wstring(L"Full version")
+                                  : std::wstring(L"Trial: add your .rap licence under Licences for the full game");
         }, [] { goto_category(L"Licences"); }},
     }});
     g_cats.push_back({L"Licences", 0xE8D7, {
+        {L"Add DLC", 0xE7B8, [] {
+            return std::wstring(L"A DLC's zip with its .pkg and its .rap licence, or the .pkg with the .rap beside it");
+        }, add_dlc},
         {L"Add licence", 0xE710, [] {
             return std::wstring(L"Your .rap file for the full game (UP0101-NPUB30505_00-CVHDZDLCZUNLOCKZ.rap)");
         }, add_licence},
         {L"Installed licences", 0xE8A5, [] {
-            std::wstring l = licence_file();
-            return l.empty() ? std::wstring(L"None yet") : l;
+            int n = dlc_licences();
+            return std::wstring(full_licence() ? L"Full version" : L"Trial") + L", " +
+                   (n == 0 ? std::wstring(L"no DLC") : std::to_wstring(n) + L" DLC");
         }, [] { open_path(g_root + L"\\licenses"); }},
     }});
     g_cats.push_back({L"Installation", 0xE7B8, {
@@ -771,7 +800,7 @@ static void draw_installing()
     float x = 190, y = 150, w = 900, h = 420;
     panel(x, y, w, h);
     color(1, 1, 1);
-    text(L"Installing Castlevania: Harmony of Despair", f_h1, x + 40, y + 34, w - 80, 36);
+    text(g_installing_dlc ? L"Adding the DLC" : L"Installing Castlevania: Harmony of Despair", f_h1, x + 40, y + 34, w - 80, 36);
     wchar_t step[256];
     if (g_inst.steps)
         swprintf(step, 256, L"Step %d of %d: %ls", g_inst.step, g_inst.steps, g_inst.step_title.c_str());
@@ -980,7 +1009,10 @@ static void poll_install()
     if (code == 0) {
         goto_category(L"Game");
         g_cats[g_cat].sel = 0;
-        message(L"Ready to play", L"The game is installed. Choose Play to start it.");
+        if (g_installing_dlc)
+            message(L"DLC added", L"The DLC is unlocked. It shows in the game the next time it starts.");
+        else
+            message(L"Ready to play", L"The game is installed. Choose Play to start it.");
     } else {
         static const wchar_t* why[] = {
             nullptr, L"Setting up the game failed.", nullptr,
