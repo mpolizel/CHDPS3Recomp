@@ -745,7 +745,7 @@ index 341b7105..d66db8ea 100644
  #define PPU_HASH_MASK (PPU_HASH_SIZE - 1)
  
 diff --git a/runtime/spu/spu_channels.c b/runtime/spu/spu_channels.c
-index 623f285b..49de6e18 100644
+index 623f285b..6dc0c49e 100644
 --- a/runtime/spu/spu_channels.c
 +++ b/runtime/spu/spu_channels.c
 @@ -2910,6 +2910,23 @@ void spu_indirect_branch(spu_context* ctx)
@@ -772,6 +772,23 @@ index 623f285b..49de6e18 100644
              if ((w >> 21) == 0u) {                 /* stop / stopd */
                  ctx->stop_code = w & 0x3FFFu;
                  static int _n = 0;
+@@ -2969,7 +2986,15 @@ void spu_indirect_branch(spu_context* ctx)
+               if (PS3_LOG_FIRST(_n, 8))
+                   fprintf(stderr, "[spu] img=%d interpreting unlifted LS 0x%05X "
+                           "(runtime-loaded code)\n", ctx->image_id, p);
+-              spu_interp_run(ctx, p);
++              /* Run it as the call it is: stop at its return address (lr, set
++               * by the bisl that got here) and hand back to the lifted caller.
++               * Interpreting on past the return called back into lifted code
++               * from inside the interpreter, one host frame deeper per call:
++               * HoD's MultiStream calls the firmware ATRAC decoder for every
++               * music block, so after a few minutes of music the SPU hit the
++               * 2000-deep recursion guard and halted, and all sound stopped. */
++              uint32_t ret = ctx->gpr[0]._u32[0] & SPU_LS_MASK;
++              spu_interp_run_until(ctx, p, ret);
+               return;
+           } }
+         spu_halt(ctx);
 diff --git a/tools/lift_prx.py b/tools/lift_prx.py
 index 9fca6d5c..f6c76603 100644
 --- a/tools/lift_prx.py
