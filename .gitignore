@@ -34,3 +34,4 @@ build-launcher/
 launcher.ini
 /CHDLauncher.exe
 config.ini
+dist/

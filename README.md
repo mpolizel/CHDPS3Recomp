@@ -31,7 +31,12 @@ If you enjoy this project, you can support it here: [Buy me a coffee](https://bu
 
 ## Install
 
-Open **`CHDLauncher.exe`**. Under **Installation**, choose your game package, then **Install**. For the full game, add your `.rap` under **Licences**. When it's done, **Game → Play** starts it.
+1. Download `CHDPS3Recomp-v<version>-windows-x64.zip` from the [Releases](https://github.com/mpolizel/CHDPS3Recomp/releases) page and unzip it to a folder of your choice.
+2. Open **`CHDLauncher.exe`**.
+
+Nothing else needs to be installed: the package carries its own Python, and the installer downloads its build tools.
+
+In the launcher, under **Installation**, choose your game package, then **Install**. For the full game, add your `.rap` under **Licences**. When it's done, **Game → Play** starts it.
 
 The launcher's menu is inspired by the PS3's, with its own art. It runs with keyboard, controller (XInput) or mouse, shows the installation's progress, and comes back when the game closes. The source is [launcher/launcher.cpp](launcher/launcher.cpp). `build_launcher.bat` builds it with the portable toolchain; the release ships it built, since it holds no game code.
 
@@ -44,6 +49,22 @@ install.bat <UP0101-NPUB30505_00-CASTHARMONYOFDES.pkg> [UP0101-NPUB30505_00-CVHD
 ```
 
 Once it's done, open `build-mingw\CHDPS3Recomp.exe` to play. It needs no arguments and opens no console; its log goes to `out\run.log`.
+
+## Building a release
+
+```powershell
+build_launcher.bat                        # CHDLauncher.exe (needs cache\toolchain: run the installer once)
+.venv\Scripts\python tools\make_release.py  # dist\CHDPS3Recomp-v<version>-windows-x64.zip
+```
+
+`make_release.py` packages the following:
+- the launcher and a portable Python (`tools/bundle_python.py`);
+- the port's sources, the installer, and ps3recomp's tracked files with `patches/ps3recomp` applied (marked `.chd-patched`, so no Git is needed);
+- the docs, licences and manifests.
+
+It checks that `ext/ps3recomp` matches the patch exactly. Before zipping, it refuses to package any game file, key file or the game's klicensee, which it reads from the local EBOOT. Bump `version.txt` first (0.0.1 … 0.0.9, then 0.1.0).
+
+Windows Defender's machine-learning check may flag an unsigned `CHDLauncher.exe` as a false positive. Signing the exe, or reporting it at https://www.microsoft.com/wdsi/filesubmission, avoids that for players.
 
 ## Settings
 
