@@ -133,13 +133,14 @@ Open them in the launcher under **Settings**, or press **F1** in the game to ope
 | Fullscreen picture | Keep the game's shape (black bars on ultrawide or 16:10), Stretch | right away |
 | Window size | 1280x720, 1600x900, 1920x1080, 2560x1440 | right away |
 | Volume | 0 to 100% | right away (the game's session in Windows' mixer) |
+| Resolution | 1920x1080 (default), 1280x720 | next start |
 | VSync | On, Off | next start |
 | Show FPS | Off, On (in the title) | right away |
 | Esc closes the game | No, Yes | right away |
 
 While the settings are open over the game, the controller doesn't reach the game.
 
-The image the game is presented at stays 1280x720. A `Resolution=1920x1080` line is read, but at that size the title screen draws only its text, so it isn't offered yet.
+**Resolution** (next start): 1920x1080, the default and the game's own (it renders internally at that size), or 1280x720, lighter. At 1080p the backend used to take the game's 1920x1080 surfaces and title art for "the frame so far" because they matched the display, and drew them black; the port turns that guess off (`SCREEN_AS_TEX=0`) and the runtime patch no longer applies it to the game's own render targets.
 
 The installer ([tools/install.py](tools/install.py)) does the rest:
 1. Checks the package.

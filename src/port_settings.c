@@ -3,7 +3,7 @@
  *
  * config.ini sits in the install folder; the launcher's Settings category
  * writes it. Read before the renderer starts:
- *   [Display] Resolution=1280x720|1920x1080   the image the game is presented at
+ *   [Display] Resolution=1920x1080|1280x720   the image the game is presented at
  *             VSync=1|0
  * Applied live while the game runs (the file is watched):
  *   [Display] Mode=windowed|fullscreen        (borderless fullscreen)
@@ -87,7 +87,9 @@ static LiveSettings read_live(void)
 void port_settings_early(unsigned* out_w, unsigned* out_h)
 {
     int w, h;
-    ini_size("Display", "Resolution", 1280, 720, &w, &h);
+    /* The game renders 1920x1080 internally; presenting it at that size is
+     * the sharp picture, 1280x720 the lighter one. */
+    ini_size("Display", "Resolution", 1920, 1080, &w, &h);
     *out_w = (unsigned)w;
     *out_h = (unsigned)h;
     s_img_w = (unsigned)w;
@@ -97,6 +99,10 @@ void port_settings_early(unsigned* out_w, unsigned* out_h)
      * controller must not drive the game. */
     if (!getenv("PAD_FOCUS_ONLY")) _putenv_s("PAD_FOCUS_ONLY", "1");
     if (!getenv("PS3_TITLE")) _putenv_s("PS3_TITLE", kTitle);
+    /* The backend takes a texture the size of the display for "the frame so
+     * far" (a guess other titles need). This game samples none such: at 1080p
+     * its 1920x1080 title art matched the display and was drawn black. */
+    if (!getenv("SCREEN_AS_TEX")) _putenv_s("SCREEN_AS_TEX", "0");
     fprintf(stderr, "[settings] resolution %dx%d, vsync %s\n", w, h, ini_int("Display", "VSync", 1) ? "on" : "off");
 }
 
