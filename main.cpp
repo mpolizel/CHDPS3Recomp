@@ -466,6 +466,11 @@ static void port_windowless_setup(int* argc, char*** argv)
         if (FILE* f = fopen(log, "w")) fclose(f);
         if (freopen(log, "a", stdout)) setvbuf(stdout, NULL, _IOLBF, 4096);
         if (freopen(log, "a", stderr)) setvbuf(stderr, NULL, _IONBF, 0);
+        /* A redirected log makes the runtime verbose by default: thousands of
+         * wait and event lines a second, which bury the useful lines, push
+         * the start out of a size-capped problem report and contend for the
+         * log's lock. PS3_VERBOSE=1 brings them back. */
+        if (!getenv("PS3_VERBOSE")) _putenv_s("PS3_VERBOSE", "0");
     }
     if (*argc < 2) {
         static char* args[3];

@@ -23,6 +23,7 @@
 #define NOMINMAX
 #define COBJMACROS
 #include <windows.h>
+#include <intrin.h>
 #include <mmdeviceapi.h>
 #include <audiopolicy.h>
 #ifdef _MSC_VER
@@ -84,6 +85,49 @@ static LiveSettings read_live(void)
 }
 
 /* Called from main() before the renderer starts. */
+/* A short summary at the top of run.log: the PC and the settings, the first
+ * things a problem report needs. */
+typedef LONG (WINAPI *RtlGetVersion_fn)(OSVERSIONINFOW*);
+
+static void log_header(int res_w, int res_h)
+{
+    char ver[32] = "?";
+    FILE* vf = fopen("version.txt", "r");
+    if (vf) {
+        if (fgets(ver, sizeof ver, vf)) ver[strcspn(ver, "\r\n")] = 0;
+        fclose(vf);
+    }
+    OSVERSIONINFOW os = {sizeof os};
+    RtlGetVersion_fn rtl = (RtlGetVersion_fn)(void*)GetProcAddress(GetModuleHandleW(L"ntdll.dll"), "RtlGetVersion");
+    if (rtl) rtl(&os);
+    int cpu[4];
+    char brand[49] = {0};
+    __cpuid(cpu, 0x80000000);
+    if ((unsigned)cpu[0] >= 0x80000004u)
+        for (int i = 0; i < 3; i++) { __cpuid(cpu, 0x80000002 + i); memcpy(brand + 16 * i, cpu, 16); }
+    const char* b = brand;
+    while (*b == ' ') b++;
+    SYSTEM_INFO si;
+    GetNativeSystemInfo(&si);
+    MEMORYSTATUSEX mem = {sizeof mem};
+    GlobalMemoryStatusEx(&mem);
+    DISPLAY_DEVICEA dd = {sizeof dd};
+    char gpu[128] = "?";
+    for (DWORD i = 0; EnumDisplayDevicesA(NULL, i, &dd, 0); i++)
+        if (dd.StateFlags & DISPLAY_DEVICE_PRIMARY_DEVICE) { strncpy(gpu, dd.DeviceString, sizeof gpu - 1); break; }
+    const LiveSettings s = read_live();
+    fprintf(stderr,
+            "=== CHDPS3Recomp %s ===\n"
+            "[system] Windows %lu.%lu build %lu; CPU %s (%lu threads); RAM %.1f GB; primary display on %s, %dx%d\n"
+            "[system] settings: resolution %dx%d, %s, picture %s, window %dx%d, vsync %s, volume %d, fps %s, esc quits %s\n",
+            ver, os.dwMajorVersion, os.dwMinorVersion, os.dwBuildNumber, *b ? b : "?",
+            si.dwNumberOfProcessors, mem.ullTotalPhys / 1073741824.0, gpu,
+            GetSystemMetrics(SM_CXSCREEN), GetSystemMetrics(SM_CYSCREEN),
+            res_w, res_h, s.fullscreen ? "fullscreen" : "windowed", s.stretch ? "stretched" : "kept",
+            s.win_w, s.win_h, ini_int("Display", "VSync", 1) ? "on" : "off", s.volume,
+            s.show_fps ? "on" : "off", s.esc_quits ? "on" : "off");
+}
+
 void port_settings_early(unsigned* out_w, unsigned* out_h)
 {
     int w, h;
@@ -103,7 +147,7 @@ void port_settings_early(unsigned* out_w, unsigned* out_h)
      * far" (a guess other titles need). This game samples none such: at 1080p
      * its 1920x1080 title art matched the display and was drawn black. */
     if (!getenv("SCREEN_AS_TEX")) _putenv_s("SCREEN_AS_TEX", "0");
-    fprintf(stderr, "[settings] resolution %dx%d, vsync %s\n", w, h, ini_int("Display", "VSync", 1) ? "on" : "off");
+    log_header(w, h);
 }
 
 /* ---- audio: the volume of this process's session, as in Windows' mixer ---- */
