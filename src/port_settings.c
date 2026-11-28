@@ -390,7 +390,50 @@ void port_settings_start(void)
     if (t) CloseHandle(t);
 }
 
+/* Slowdowns in the log. Called on each present with the game's flip count
+ * (the presents themselves can repeat a flip, so they are not counted). The
+ * PS3 game runs at 60 frames a second: a second with fewer than 55 flips, or
+ * with a gap over 50 ms between two (a hitch), gets one line, so a smooth
+ * game writes nothing and a report says when it slowed down and how much.
+ * PORT_PERFLOG=1 logs every second. */
+void port_perf_frame(unsigned flips, unsigned vblanks)
+{
+    static LARGE_INTEGER freq, start, win, last;
+    static unsigned win_flips, last_flips, win_vbl;
+    static double worst;
+    static int all = -1;
+    LARGE_INTEGER now;
+    QueryPerformanceCounter(&now);
+    if (all < 0) {
+        all = getenv("PORT_PERFLOG") ? 1 : 0;
+        QueryPerformanceFrequency(&freq);
+        start = win = last = now;
+        win_flips = last_flips = flips;
+        win_vbl = vblanks;
+        return;
+    }
+    if (flips != last_flips) {
+        const double gap = (double)(now.QuadPart - last.QuadPart) * 1000.0 / freq.QuadPart;
+        if (gap > worst) worst = gap;
+        last = now;
+        last_flips = flips;
+    }
+    const double span = (double)(now.QuadPart - win.QuadPart) / freq.QuadPart;
+    if (span >= 1.0) {
+        const double fps = (flips - win_flips) / span;
+        if (all || fps < 55.0 || worst > 50.0)
+            fprintf(stderr, "[perf] t=%.0fs fps=%.1f worst=%.0fms vblank=%.1f\n",
+                    (double)(now.QuadPart - start.QuadPart) / freq.QuadPart, fps, worst,
+                    (vblanks - win_vbl) / span);
+        win = now;
+        win_flips = flips;
+        win_vbl = vblanks;
+        worst = 0.0;
+    }
+}
+
 #else
+void port_perf_frame(unsigned flips, unsigned vblanks) { (void)flips; (void)vblanks; }
 void port_settings_early(unsigned* w, unsigned* h) { *w = 1280; *h = 720; }
 void port_settings_start(void) {}
 #endif

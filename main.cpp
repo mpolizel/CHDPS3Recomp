@@ -198,11 +198,14 @@ extern "C" unsigned ppu_boot_frames_presented(void)
 }
 
 extern "C" void port_achievements_frame(void);   /* src/port_achievements.c */
+extern "C" void port_perf_frame(unsigned flips, unsigned vblanks); /* src/port_settings.c */
+static volatile LONG g_vblanks_ticked;
 
 static void present_guest_frame(void)
 {
     rsx_backend_present();
     port_achievements_frame();
+    port_perf_frame(cellGcm_flip_request_count(), (unsigned)g_vblanks_ticked);
     /* This thread increments and guest threads read, so interlocked rather
      * than a volatile ++, which on arm64 is neither atomic nor a fence. */
     InterlockedIncrement(&g_frames_presented);
@@ -218,19 +221,37 @@ static DWORD WINAPI frame_clock(LPVOID)
             rsx_ok ? "OK -- window open" : "FAILED");
 
     unsigned  last_flip = 0;
-    ULONGLONG next_tick = GetTickCount64();
+    /* The vblank beat runs on the performance counter, at the PS3's 59.94 Hz.
+     * It ran on GetTickCount64, which only moves in ~15.6 ms steps: beats
+     * came in pairs or with a 31 ms hole, and a title that shows a frame
+     * every second vblank (HoD in a stage) lost frames to it, running at
+     * ~26 frames a second and its clock at ~85 % of real time. */
+    LARGE_INTEGER qpf, qnow;
+    QueryPerformanceFrequency(&qpf);
+    QueryPerformanceCounter(&qnow);
+    long long tick_us = 16683;           /* 1/59.94 s */
+    /* PORT_VBLANK_LEGACY=1: the old beat (16 ms on the tick count), to compare. */
+    const int legacy = getenv("PORT_VBLANK_LEGACY") != NULL;
+    if (legacy) tick_us = 16000;
+    #define PORT_NOW_US() (legacy ? (long long)GetTickCount64() * 1000                                   : (QueryPerformanceCounter(&qnow), qnow.QuadPart * 1000000 / qpf.QuadPart))
+    long long next_tick = PORT_NOW_US();
 
     for (;;) {
         /* Wait on the FIFO kick event, not a flat Sleep(4): the runtime
          * signals it when the guest needs the walker now (a dry fence queue,
          * a ring recycle, and, opted in, an SPU write of put). Nothing kicks:
-         * the same 4 ms. GCM_FIFO_KICK=0 restores the plain sleep. */
-        cellGcm_fifo_kick_wait(4);
-        ULONGLONG now = GetTickCount64();
+         * up to 4 ms, less when the next beat is sooner, so the beat lands
+         * within about a millisecond. GCM_FIFO_KICK=0 restores the plain sleep. */
+        long long now = PORT_NOW_US();
+        long long wait_ms = legacy ? 4 : (next_tick - now + 999) / 1000;
+        if (wait_ms > 4) wait_ms = 4;
+        if (wait_ms > 0) cellGcm_fifo_kick_wait((unsigned)wait_ms);
+        now = PORT_NOW_US();
 
         int fired = 0;
         while ((long long)(now - next_tick) >= 0 && fired < 240) {
             cellGcmTickVBlank();
+            InterlockedIncrement(&g_vblanks_ticked);
             cellGcmTickFlip();
             /* Present a pending flip BEFORE draining any further. The flip
              * fires at a get==put frame boundary on the guest thread, so the
@@ -245,7 +266,7 @@ static DWORD WINAPI frame_clock(LPVOID)
              * labels the game's per-frame logic blocks on, so it has to keep
              * advancing at 60 Hz even while present() throttles. */
             if (rsx_ok) cellGcm_rsx_process_fifo();
-            next_tick += 16;             /* ~60 Hz */
+            next_tick += tick_us;
             fired++;
         }
         if (fired >= 240) next_tick = now;   /* fell too far behind -- resync */
