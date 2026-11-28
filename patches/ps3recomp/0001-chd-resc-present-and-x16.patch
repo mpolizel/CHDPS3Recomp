@@ -132,7 +132,7 @@ index a21adb80..52184be6 100644
          /* AUDIO_RATE=1: blocks mixed vs real time, and frames dropped. */
          { static int on = -1; if (on < 0) on = getenv("AUDIO_RATE") ? 1 : 0;
 diff --git a/libs/input/cellPad.c b/libs/input/cellPad.c
-index ab241cfa..d43088f7 100644
+index ab241cfa..b6117047 100644
 --- a/libs/input/cellPad.c
 +++ b/libs/input/cellPad.c
 @@ -235,6 +235,8 @@ static int pad_key_down(int key) { return (GetAsyncKeyState(key) & 0x8000) != 0;
@@ -153,7 +153,7 @@ index ab241cfa..d43088f7 100644
  #define PADKEY_RETURN 36
  #define PADKEY_TAB 48
  #elif PAD_BACKEND_SDL2
-@@ -297,6 +301,8 @@ static int pad_key_down(int key)
+@@ -297,10 +301,18 @@ static int pad_key_down(int key)
  #define PADKEY_W SDL_SCANCODE_W
  #define PADKEY_1 SDL_SCANCODE_1
  #define PADKEY_2 SDL_SCANCODE_2
@@ -162,7 +162,35 @@ index ab241cfa..d43088f7 100644
  #define PADKEY_RETURN SDL_SCANCODE_RETURN
  #define PADKEY_TAB SDL_SCANCODE_TAB
  #endif
-@@ -326,6 +332,7 @@ static void pad_poll_keyboard(void)
+ 
++/* Buttons held by a test harness (CELL_PAD_CTRL_* bits, port 0), on top of
++ * the keyboard and regardless of focus: a port's debug console sets this to
++ * drive menus without synthesised key events, which the game can miss while
++ * a screen is changing. Zero in normal play. */
++volatile u32 g_pad_inject_buttons = 0;
++
+ static void pad_poll_keyboard(void)
+ {
+     static int off = -1;
+@@ -308,6 +320,17 @@ static void pad_poll_keyboard(void)
+     if (off) return;
+ 
+     PadHostState* hs = &s_host_state[0];
++    if (g_pad_inject_buttons) {
++        const u32 b = g_pad_inject_buttons;
++        hs->buttons = (u16)b;
++        hs->connected = 1;
++        hs->analog_lx = (u8)((b & CELL_PAD_CTRL_LEFT) ? 0 : (b & CELL_PAD_CTRL_RIGHT) ? 255 : 128);
++        hs->analog_ly = (u8)((b & CELL_PAD_CTRL_UP) ? 0 : (b & CELL_PAD_CTRL_DOWN) ? 255 : 128);
++        hs->analog_rx = hs->analog_ry = 128;
++        hs->trigger_l2 = (u8)((b & CELL_PAD_CTRL_L2) ? 255 : 0);
++        hs->trigger_r2 = (u8)((b & CELL_PAD_CTRL_R2) ? 255 : 0);
++        return;
++    }
+     if (!pad_host_window_focused()) {
+         /* Release everything on focus loss, or a key held while alt-tabbing
+          * would stay down forever. */
+@@ -326,6 +349,7 @@ static void pad_poll_keyboard(void)
          { PADKEY_Q,      CELL_PAD_CTRL_L1 },      { PADKEY_W,     CELL_PAD_CTRL_R1 },
          { PADKEY_1,      CELL_PAD_CTRL_L2 },      { PADKEY_2,     CELL_PAD_CTRL_R2 },
          { PADKEY_RETURN, CELL_PAD_CTRL_START },   { PADKEY_TAB,   CELL_PAD_CTRL_SELECT },
@@ -170,7 +198,7 @@ index ab241cfa..d43088f7 100644
      };
  
      u16 btns = 0;
-@@ -338,7 +345,13 @@ static void pad_poll_keyboard(void)
+@@ -338,7 +362,13 @@ static void pad_poll_keyboard(void)
                           (btns & CELL_PAD_CTRL_RIGHT) ? 255 : 128);
      hs->analog_ly = (u8)((btns & CELL_PAD_CTRL_UP) ? 0 :
                           (btns & CELL_PAD_CTRL_DOWN) ? 255 : 128);
@@ -184,7 +212,7 @@ index ab241cfa..d43088f7 100644
      hs->trigger_l2 = (u8)((btns & CELL_PAD_CTRL_L2) ? 255 : 0);
      hs->trigger_r2 = (u8)((btns & CELL_PAD_CTRL_R2) ? 255 : 0);
  
-@@ -439,6 +452,19 @@ static void pad_poll_xinput(void)
+@@ -439,6 +469,19 @@ static void pad_poll_xinput(void)
          s_pad_empty_until[i] = 0;
  
          s_host_state[i].connected = 1;
@@ -366,7 +394,7 @@ index 246ca166..c0a50c10 100644
      /* Color mask — bits: [0] B, [8] G, [16] R, [24] A */
      u32 color_mask;
 diff --git a/libs/video/rsx_d3d12_backend.c b/libs/video/rsx_d3d12_backend.c
-index 90238150..c149973f 100644
+index 90238150..7196fc28 100644
 --- a/libs/video/rsx_d3d12_backend.c
 +++ b/libs/video/rsx_d3d12_backend.c
 @@ -49,6 +49,7 @@
@@ -447,7 +475,27 @@ index 90238150..c149973f 100644
      if (n <= 0) { static int _e=0; if(PS3_LOG_FIRST(_e, 16)) printf("[FP] decompile fail (fp=0x%08X)\n", fp_addr); return NULL; }
      if (unnorm_mask) {
          rsx_fp_apply_unnorm_scale(hlsl, sizeof(hlsl), unnorm_mask, (const u32 (*)[3])unnorm_dim, cube_mask, 0);
-@@ -3541,8 +3573,16 @@ static void vp_record_cb(u32 slot, int vs_idx, const D3D12DrawRecord* dr)
+@@ -3177,6 +3209,19 @@ static int vp_upload_tex_slot(u32 off, u32 w, u32 h, u32 fmt, int cube, u32 mips
+     /* Pixel conversion -- deswizzle, channel order, block copy -- is RSX
+      * semantics and lives in rsx_texture_layout.c, so a second backend gets
+      * it by calling this rather than porting the loops again. */
++    /* X16DBG=1: a 16-bit single-channel texture (a palette index image) with
++     * values past 4095 -- the palette lookup clamps those to its last entry. */
++    if (getenv("X16DBG") && (fmt & 0x9F) == 0x94 && w <= 64 && h <= 64) {
++        u32 mx = 0, nz = 0; const u8* q = vm_base + off;
++        for (u32 y = 0; y < h; y++) for (u32 x = 0; x < w; x++) {
++            u32 v = ((u32)q[y * (pitch_arg ? pitch_arg : w * 2) + x * 2] << 8) | q[y * (pitch_arg ? pitch_arg : w * 2) + x * 2 + 1];
++            if (v) nz++; if (v > mx) mx = v; }
++        static u32 seen[64]; static int ns = 0; int k = 0;
++        for (int i = 0; i < ns; i++) if (seen[i] == (off ^ mx)) k = 1;
++        if (!k && ns < 64 && (mx >= 0x1000 || getenv("X16ALL"))) { seen[ns++] = off ^ mx;
++            fprintf(stderr, "[x16] off=0x%08X %ux%u pitch=%u max=0x%04X nonzero=%u frame=%llu%c",
++                    off, w, h, pitch_arg, mx, nz, (unsigned long long)s_d3d.frame_count, 10); }
++    }
+     rsx_texture_decode(mapped, pitch, vm_base + off, w, h, &tl,
+                        rsx_texture_argb_is_rgba());
+ 
+@@ -3541,8 +3586,16 @@ static void vp_record_cb(u32 slot, int vs_idx, const D3D12DrawRecord* dr)
              extern u32 cellGcmResolveLocated(int, u32);
              u32 foff = cellGcmResolveLocated((dr->fp_addr & 0x3u) == 1,
                                               dr->fp_addr & ~0x3u);
@@ -466,7 +514,7 @@ index 90238150..c149973f 100644
              /* FPK_DBG=1: the fragment constants as the shader will see them.
               * A program whose only output is fp_k[0].xxxx renders black if
               * those constants never arrive, which looks identical from the
-@@ -3763,6 +3803,46 @@ static int off_rt_find(u32 off)
+@@ -3763,6 +3816,46 @@ static int off_rt_find(u32 off)
      return -1;
  }
  
@@ -513,7 +561,7 @@ index 90238150..c149973f 100644
  /* Ensure an RT resource exists for this surface; (re)creates the RTV at
   * rt_rtv_heap[i] and the SRV at srv_heap[RT_SRV_BASE+i]. */
  static int off_rt_get(u32 off, u32 w, u32 h, u32 rsx_fmt)
-@@ -4317,11 +4397,117 @@ static u32 s_last_drawn_off  = 0;
+@@ -4317,11 +4410,117 @@ static u32 s_last_drawn_off  = 0;
  
  void rsx_d3d12_composite_from_offscreen(u32 raw_off) { s_composite_src = raw_off; }
  
@@ -632,7 +680,7 @@ index 90238150..c149973f 100644
      /* want == 2 means "whatever this frame's draws targeted" -- the one thing
       * guaranteed to hold geometry, and immune to the offset collision above. */
      int i;
-@@ -4329,6 +4515,10 @@ static void composite_present(u32 fi)
+@@ -4329,6 +4528,10 @@ static void composite_present(u32 fi)
      else            { i = off_rt_find(want); }
      if (i < 0 || !s_d3d.off_rt[i].res) return;
      OffRT* r = &s_d3d.off_rt[i];
@@ -643,7 +691,7 @@ index 90238150..c149973f 100644
      /* Same-format copy only; a half-float source would need a converting draw. */
      if (r->dxgi != DXGI_FORMAT_R8G8B8A8_UNORM) {
          static int w1 = 0;
-@@ -4994,9 +5184,15 @@ static void render_frame(void)
+@@ -4994,9 +5197,15 @@ static void render_frame(void)
                      continue;
                  }
              }
@@ -661,7 +709,7 @@ index 90238150..c149973f 100644
                  static int en = -1;
                  if (en < 0) { const char* e = getenv("SCREEN_AS_TEX"); en = e ? atoi(e) : 1; }
                  if (en) {
-@@ -5032,11 +5228,19 @@ static void render_frame(void)
+@@ -5032,11 +5241,19 @@ static void render_frame(void)
                  }
              }
              if (dr->tex[_u].set) {
@@ -684,7 +732,7 @@ index 90238150..c149973f 100644
                      continue;
                  }
                  u32 _bf = dr->tex[_u].fmt & 0x9F;
-@@ -6017,6 +6221,20 @@ skip_dump_consider: ;
+@@ -6017,6 +6234,29 @@ skip_dump_consider: ;
              }
          }
        } }
@@ -693,8 +741,17 @@ index 90238150..c149973f 100644
 +     * trigger removed. For a glitch that shows only at one place in a game,
 +     * where a frame number can't be known in advance. Checked twice a second. */
 +    { static u32 s_trig_idx = 50;
-+      if ((s_d3d.frame_count % 30) == 0 && s_dbg_last_draws > 0 &&
++      /* RSX_CAP_BURST=<n>: a trigger captures n frames in a row (a glitch that
++       * shows for a few frames only), checking for the trigger every frame. */
++      static int s_burst = -1, s_burst_left = 0;
++      if (s_burst < 0) { const char* e = getenv("RSX_CAP_BURST"); s_burst = e ? atoi(e) : 0; }
++      if (s_burst_left > 0 && s_dbg_last_draws > 0) {
++          rsx_capture_frame(fi, s_dbg_last_draws, s_trig_idx++);
++          s_burst_left--;
++      } else
++      if ((s_burst > 0 || (s_d3d.frame_count % 30) == 0) && s_dbg_last_draws > 0 &&
 +          GetFileAttributesA("rsxcap.trigger") != INVALID_FILE_ATTRIBUTES) {
++          if (s_burst > 1) s_burst_left = s_burst - 1;
 +          DeleteFileA("rsxcap.trigger");
 +          rsx_capture_frame(fi, s_dbg_last_draws, s_trig_idx++);
 +          s_dbgvtx_rearm = 1;
@@ -705,7 +762,7 @@ index 90238150..c149973f 100644
  
      /* Present, on the vblank unless D3D12_VSYNC=0: that one is for measuring a
       * title past the display's rate. Skipped for an offscreen-only batch. */
-@@ -6114,7 +6332,7 @@ static void d3d12_present(void* ud, u32 buffer_id)
+@@ -6114,7 +6354,7 @@ static void d3d12_present(void* ud, u32 buffer_id)
       * it would strobe the bare backbuffer clear. Keep accumulating -- the
       * composite draw that targets the display presents the whole chain, in
       * order, in one command list. Empty batches still present (boot/idle). */
@@ -714,7 +771,7 @@ index 90238150..c149973f 100644
      for (u32 _i = 0; _i < s_d3d.draw_count && _i < MAX_DRAWS; _i++)
          if (!s_d3d.draws[_i].is_clear && s_d3d.draws[_i].rt_off == 0) {
              flip_has_display = 1;
-@@ -6267,7 +6485,11 @@ static void d3d12_clear(void* ud, u32 flags, u32 color, float depth, u8 stencil)
+@@ -6267,7 +6507,11 @@ static void d3d12_clear(void* ud, u32 flags, u32 color, float depth, u8 stencil)
          if (blink_dbg())
              printf("[CLEAR] presenting %u accumulated draws at frame boundary\n",
                     s_d3d.draw_count);
@@ -726,7 +783,7 @@ index 90238150..c149973f 100644
          s_clear_presents++;
          s_last_clear_presented_flip = s_last_clear_boundary_flip;
      }
-@@ -6720,6 +6942,25 @@ static u32 upload_quads_vp(const rsx_state* state, u32 first, u32 count)
+@@ -6720,6 +6964,25 @@ static u32 upload_quads_vp(const rsx_state* state, u32 first, u32 count)
                      c[k][0].v[0],c[k][0].v[1],c[k][0].v[2],c[k][0].v[3],
                      c[k][8].v[0],c[k][8].v[1]);
                fclose(f); } } }
@@ -752,7 +809,7 @@ index 90238150..c149973f 100644
      }
      s_d3d.vp_vb_offset += o * VP_VERT_STRIDE;
      return o;
-@@ -6761,11 +7002,16 @@ static u32 upload_tris_vp(const rsx_state* state, u32 first, u32 count)
+@@ -6761,11 +7024,16 @@ static u32 upload_tris_vp(const rsx_state* state, u32 first, u32 count)
      { static const char* dv = (const char*)1; static u32 want = 0; static int n = 0;
        if (dv == (const char*)1) { dv = getenv("RSX_DBG_VTX");
                                    want = dv ? (u32)strtoul(dv, NULL, 16) : 0; }
@@ -773,7 +830,7 @@ index 90238150..c149973f 100644
          { int lo = -1, hi = -1, nz = 0;
            for (int r = 0; r < RSX_MAX_VERTEX_CONSTANTS; r++) {
                const float* m = state->vertex_constants[r];
-@@ -7272,8 +7518,24 @@ static u32 upload_quad_strip_vp_indexed(const rsx_state* state, u32 first, u32 c
+@@ -7272,8 +7540,24 @@ static u32 upload_quad_strip_vp_indexed(const rsx_state* state, u32 first, u32 c
      return o;
  }
  
@@ -798,7 +855,7 @@ index 90238150..c149973f 100644
      /* RSX_LIVE_FEED_DBG=1: pair with the [feed] method counts so "the FIFO
       * carries no draw batches" can be checked against "the backend is told
       * to draw" in the same run. */
-@@ -7286,7 +7548,7 @@ static void d3d12_draw_arrays(void* ud, u32 primitive, u32 first, u32 count)
+@@ -7286,7 +7570,7 @@ static void d3d12_draw_arrays(void* ud, u32 primitive, u32 first, u32 count)
      /* Log the first 20 calls in detail, then every 1000th to show liveness
       * without flooding. */
      static u64 s_total = 0;
@@ -807,7 +864,7 @@ index 90238150..c149973f 100644
          printf("[D3D12] draw_arrays #%llu prim=%u first=%u count=%u\n",
                 (unsigned long long)s_total, primitive, first, count);
      }
-@@ -7541,6 +7803,7 @@ static void d3d12_draw_arrays(void* ud, u32 primitive, u32 first, u32 count)
+@@ -7541,6 +7825,7 @@ static void d3d12_draw_arrays(void* ud, u32 primitive, u32 first, u32 count)
  
  static void d3d12_draw_indexed(void* ud, u32 primitive, u32 first, u32 count)
  {
@@ -815,7 +872,7 @@ index 90238150..c149973f 100644
      /* RSX_LIVE_FEED_DBG=1: pair with the [feed] method counts so "the FIFO
       * carries no draw batches" can be checked against "the backend is told
       * to draw" in the same run. */
-@@ -7779,7 +8042,12 @@ static void d3d12_bind_texture(void* ud, u32 unit, const rsx_texture_state* tex)
+@@ -7779,7 +8064,12 @@ static void d3d12_bind_texture(void* ud, u32 unit, const rsx_texture_state* tex)
            * decodes: X16 (God of War: Ascension's 256x256 font atlas -- without
            * it every glyph drew as a solid quad), Y16_X16, X32_FLOAT and
            * Y16_X16_FLOAT (its post-process intermediates). */
@@ -829,7 +886,26 @@ index 90238150..c149973f 100644
          /* TEX_RESOLVE_AUTO=1: resolve through the page tables (local-page map
           * then IO table) instead of trusting the format's location bits. A
           * texture the guest built in main memory but tagged local resolves to
-@@ -8080,6 +8348,23 @@ void rsx_d3d12_backend_present(void)
+@@ -7840,6 +8130,18 @@ static void d3d12_bind_texture(void* ud, u32 unit, const rsx_texture_state* tex)
+                         unit, (tex->format >> 8) & 0xFFu, width, height,
+                         (tex->format>>16)&0xFFFFu, (tex->format&4)?1:0, offset, 10); } }
+         s_d3d.cur_texs[unit].set = 1;
++    } else if (unit < 16) {
++        /* A format not decoded here leaves the unit with no texture, and the
++         * draw comes out as a flat quad of its vertex colour (often white).
++         * Say so once per format, so the log names the missing decoder. */
++        static u32 s_unsup_seen[8]; static int s_unsup_n = 0;
++        int known = 0;
++        for (int i = 0; i < s_unsup_n; i++) if (s_unsup_seen[i] == base_fmt) known = 1;
++        if (!known && s_unsup_n < 8) {
++            s_unsup_seen[s_unsup_n++] = base_fmt;
++            fprintf(stderr, "[tex] unsupported format 0x%02X (full 0x%02X) %ux%u unit %u off 0x%X: drawn untextured%c",
++                    base_fmt, format, width, height, unit, offset, 10);
++        }
+     }
+     if (base_fmt == 0x81 /* B8 */) {
+         s_d3d.tex_src_offset = cellGcmResolveLocated((tex->format & 3) == 1, offset);
+@@ -8080,6 +8382,23 @@ void rsx_d3d12_backend_present(void)
              return;
      }
  

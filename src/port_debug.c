@@ -41,6 +41,28 @@ static void debug_answer(const char* cmd)
         if (f && vm_base) { fwrite(vm_base + ea, 1, len, f); fclose(f);
                             fprintf(o, "> %s\nwrote %u bytes from 0x%08X to %s\n", cmd, len, ea, host); }
         else fprintf(o, "> %s\ncannot write %s\n", cmd, host);
+    } else if (strncmp(cmd, "press ", 6) == 0 || strncmp(cmd, "hold ", 5) == 0) {
+        /* press <buttons> [ms]: hold controller buttons on port 0 for ms
+         * (default 150), e.g. "press cross", "press down 100", "press right+cross 600".
+         * Names: up down left right cross circle square triangle l1 r1 l2 r2 l3 r3 start select. */
+        static const struct { const char* n; unsigned b; } names[] = {
+            {"select",1u<<0},{"l3",1u<<1},{"r3",1u<<2},{"start",1u<<3},{"up",1u<<4},{"right",1u<<5},
+            {"down",1u<<6},{"left",1u<<7},{"l2",1u<<8},{"r2",1u<<9},{"l1",1u<<10},{"r1",1u<<11},
+            {"triangle",1u<<12},{"circle",1u<<13},{"cross",1u<<14},{"square",1u<<15}};
+        char list[200] = {0};
+        unsigned ms = 150, mask = 0;
+        sscanf(cmd, "%*s %199s %u", list, &ms);
+        for (char* t = strtok(list, "+"); t; t = strtok(NULL, "+"))
+            for (unsigned i = 0; i < sizeof names / sizeof names[0]; i++)
+                if (strcmp(t, names[i].n) == 0) mask |= names[i].b;
+        extern volatile unsigned int g_pad_inject_buttons;   /* libs/input/cellPad.c */
+        if (ms > 10000) ms = 10000;
+        g_pad_inject_buttons = mask;
+#ifdef _WIN32
+        Sleep(ms);
+#endif
+        g_pad_inject_buttons = 0;
+        fprintf(o, "> %s\nheld 0x%04X for %u ms\n", cmd, mask, ms);
     } else if (sscanf(cmd, "trophy %u", &val) == 1) {
         /* Unlock a trophy through ps3recomp's sceNpTrophyUnlockTrophy, as the
          * game does, and pass it on like src/port_achievements.c's hook:
