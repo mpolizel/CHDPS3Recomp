@@ -200,10 +200,21 @@ extern "C" unsigned ppu_boot_frames_presented(void)
 extern "C" void port_achievements_frame(void);   /* src/port_achievements.c */
 extern "C" void port_perf_frame(unsigned flips, unsigned vblanks); /* src/port_settings.c */
 static volatile LONG g_vblanks_ticked;
+/* Time the beat thread spends presenting and draining, for the [perf] line. */
+static double g_t_present_ms, g_t_present_max, g_t_drain_ms, g_t_drain_max;
+static double port_now_ms(void) { LARGE_INTEGER c, f; QueryPerformanceCounter(&c); QueryPerformanceFrequency(&f); return c.QuadPart * 1000.0 / f.QuadPart; }
+extern "C" void port_perf_beat_stats(double* pr, double* prmax, double* dr, double* drmax)
+{ *pr = g_t_present_ms; *prmax = g_t_present_max; *dr = g_t_drain_ms; *drmax = g_t_drain_max;
+  g_t_present_ms = g_t_present_max = g_t_drain_ms = g_t_drain_max = 0; }
+static void timed_drain(void) { double t = port_now_ms(); cellGcm_rsx_process_fifo(); t = port_now_ms() - t;
+  g_t_drain_ms += t; if (t > g_t_drain_max) g_t_drain_max = t; }
 
 static void present_guest_frame(void)
 {
+    double t0 = port_now_ms();
     rsx_backend_present();
+    t0 = port_now_ms() - t0;
+    g_t_present_ms += t0; if (t0 > g_t_present_max) g_t_present_max = t0;
     port_achievements_frame();
     port_perf_frame(cellGcm_flip_request_count(), (unsigned)g_vblanks_ticked);
     /* This thread increments and guest threads read, so interlocked rather
@@ -265,7 +276,7 @@ static DWORD WINAPI frame_clock(LPVOID)
             /* Drain the FIFO every tick. This is what writes the RSX sync-fence
              * labels the game's per-frame logic blocks on, so it has to keep
              * advancing at 60 Hz even while present() throttles. */
-            if (rsx_ok) cellGcm_rsx_process_fifo();
+            if (rsx_ok) timed_drain();
             next_tick += tick_us;
             fired++;
         }
@@ -281,7 +292,7 @@ static DWORD WINAPI frame_clock(LPVOID)
                 present_guest_frame();
                 last_flip = cellGcm_flip_request_count();
             }
-            cellGcm_rsx_process_fifo();
+            timed_drain();
 
             if (rsx_backend_pump() != 0) {
                 rsx_ok = 0;              /* window closed */

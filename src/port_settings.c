@@ -421,10 +421,13 @@ void port_perf_frame(unsigned flips, unsigned vblanks)
     const double span = (double)(now.QuadPart - win.QuadPart) / freq.QuadPart;
     if (span >= 1.0) {
         const double fps = (flips - win_flips) / span;
+        extern void port_perf_beat_stats(double*, double*, double*, double*);
+        double pr, prm, dr, drm;
+        port_perf_beat_stats(&pr, &prm, &dr, &drm);
         if (all || fps < 55.0 || worst > 50.0)
-            fprintf(stderr, "[perf] t=%.0fs fps=%.1f worst=%.0fms vblank=%.1f\n",
+            fprintf(stderr, "[perf] t=%.0fs fps=%.1f worst=%.0fms vblank=%.1f present=%.0fms(max %.0f) drain=%.0fms(max %.0f)\n",
                     (double)(now.QuadPart - start.QuadPart) / freq.QuadPart, fps, worst,
-                    (vblanks - win_vbl) / span);
+                    (vblanks - win_vbl) / span, pr, prm, dr, drm);
         win = now;
         win_flips = flips;
         win_vbl = vblanks;
